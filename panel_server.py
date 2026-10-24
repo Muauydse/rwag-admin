@@ -383,6 +383,24 @@ def account_license_for(acc: dict, dev: dict):
     dev["accountId"] = acc["id"]
 
 
+def change_stamp(did: str) -> str:
+    """بصمة لكل ما يصل للجهاز في المزامنة: إذا تغيّرت يعرف النظام المفتوح أن هناك تعديلاً فيزامن فوراً"""
+    dev = DB["devices"].get(did) or {}
+    acc = next((a for a in DB["accounts"] if did in a.get("devices", [])), None) or {}
+    lic = dev.get("license") or {}
+    parts = [
+        {k: lic.get(k) for k in ("plan", "label", "start", "end", "issued")}, dev.get("blocked", False),
+        [x["id"] for x in dev.get("pushes", [])],
+        acc.get("active", True), acc.get("licVer"), acc.get("settingsVer"), acc.get("license"),
+        max((n["created"] for n in DB["notifications"] if n["target"] in ("all", did)), default=""),
+        max((m["time"] for t in DB["tickets"] if t["deviceId"] == did for m in t["messages"] if m["from"] == "admin"), default=""),
+        max((u["created"] for u in DB["updates"]), default=""),
+        DB["system"], DB["prices"], [plan_public(x) for x in active_plans()], DB["settings"].get("payMethods", []),
+        [x.get("id") for x in acc.get("contracts", [])],
+    ]
+    return hashlib.sha1(json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
 def record_sale(u: dict, b: dict, kind: str, ref: str, customer: str, plan: str, label: str):
     if plan == "revoked":
         return None
@@ -836,6 +854,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if method != "POST":
             return self.send_json(405, {"ok": False})
         b = self.body()
+        if path == "/api/client/poll":
+            # فحص خفيف كل بضع ثوانٍ من النظام المفتوح: بصمة لكل ما قد يصل للجهاز — لا يكتب شيئاً
+            did = clean((b.get("device") or {}).get("deviceId"), 64)
+            with lock:
+                stamp = change_stamp(did)
+            return self.send_json(200, {"ok": True, "stamp": stamp})
         with lock:
             dev = touch_device(b.get("device") or {}, self.ip())
             did = dev["deviceId"]
