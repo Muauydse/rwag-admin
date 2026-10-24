@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="rwBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4338ca"/>
+      <stop offset=".55" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#0891b2"/>
+    </linearGradient>
+    <linearGradient id="rwShine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".22"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="rwArrow" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity=".85"/>
+      <stop offset="1" stop-color="#fde68a"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="58" fill="url(#rwBg)"/>
+  <rect width="256" height="128" rx="58" fill="url(#rwShine)"/>
+  <!-- أعمدة النمو -->
+  <rect x="58" y="150" width="30" height="50" rx="9" fill="#fff" opacity=".55"/>
+  <rect x="104" y="118" width="30" height="82" rx="9" fill="#fff" opacity=".75"/>
+  <rect x="150" y="86" width="30" height="114" rx="9" fill="#fff"/>
+  <!-- منحنى «ر» صاعد بسهم -->
+  <path d="M50 132 C 92 128, 128 104, 170 64" fill="none" stroke="url(#rwArrow)" stroke-width="15" stroke-linecap="round"/>
+  <path d="M146 56 L 188 48 L 180 90 Z" fill="#fde68a"/>
+</svg>

@@ -1,0 +1,17 @@
+# نشر لوحة تحكم رواج على Render بضغطة (Blueprint)
+# Render ← New ← Blueprint ← اختر هذا المستودع، ثم أدخل قيم الأسرار عند الطلب.
+services:
+  - type: web
+    name: rawaj-panel
+    runtime: docker
+    plan: free          # مجاني (ينام بعد 15 دقيقة خمول) — للاستخدام الفعلي يُنصح بـ starter
+    healthCheckPath: /api/public/plans
+    envVars:
+      - key: RAWAJ_SIGNING_KEY      # مفتاح توقيع التراخيص (من «تجهيز أسرار الاستضافة.bat»)
+        sync: false
+      - key: RAWAJ_SECRET_KEY       # مفتاح تشفير كلمات مرور العملاء
+        sync: false
+      - key: MONGODB_URI            # رابط MongoDB Atlas (إجباري على الاستضافة — قرص الاستضافة مؤقت)
+        sync: false
+      - key: MONGODB_DB
+        value: rawaj
