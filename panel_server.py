@@ -49,6 +49,7 @@ SECRET_FILE = os.path.join(PRIVATE, "keys", "secret.key")
 CREDENTIALS_FILE = os.path.join(PRIVATE, "بيانات الدخول — احذف هذا الملف بعد حفظها.txt")
 PANEL_BACKUPS = os.path.join(DATA, "panel-backups")
 CONTRACTS = os.path.join(DATA, "contracts")
+SITE_DOWNLOAD = os.path.join(DATA, "site-download")  # ملف تثبيت النظام الذي يحمّله زوار الموقع
 MONGO_CFG = os.path.join(DATA, "mongo.json")
 KEEP_PANEL_BACKUPS = 10
 HOST = os.environ.get("RAWAJ_PANEL_HOST", "0.0.0.0" if HOSTED else "127.0.0.1")
@@ -72,7 +73,9 @@ PERMS = {
 }
 DEFAULT_SITE = {"maintenance": {"on": False, "message": "نعمل حالياً على تحسين الموقع — سنعود قريباً.", "until": ""},
                 "announcement": {"on": False, "text": "", "link": ""},
-                "hero": {"title": "", "subtitle": ""}, "downloadUrl": "", "version": "", "fileSize": "", "whatsapp": "", "email": "",
+                "hero": {"title": "", "subtitle": ""}, "downloadUrl": "",
+                # زر التحميل: file = ملف مرفوع على اللوحة، url = رابط تحدده، contact = تواصل واتساب
+                "download": {"mode": "url", "file": "", "originalName": "", "size": 0, "sha256": "", "uploaded": "", "downloads": 0}, "version": "", "fileSize": "", "whatsapp": "", "email": "",
                 "sections": {"features": True, "showcase": True, "security": True, "plans": True, "download": True, "faq": True, "support": True}}
 DEFAULT_SYSTEM = {"maintenance": {"on": False, "message": "النظام في وضع الصيانة لتحسين الخدمة — سيعود خلال وقت قصير.", "until": ""},
                   "announcement": {"on": False, "text": "", "level": "info", "link": "", "id": ""}}
@@ -269,7 +272,7 @@ def load():
         else:
             MONGO.sync_now(full=True)    # قاعدة فارغة: رفع البيانات الحالية لأول مرة
     MONGO.start(lambda: DB)
-    MONGO.init_files(DATA, ("uploads", "client-backups", "updates", "contracts"))
+    MONGO.init_files(DATA, ("uploads", "client-backups", "updates", "contracts", "site-download"))
 
 
 def audit(who: dict, action: str, details: str = "") -> None:
@@ -381,6 +384,10 @@ def account_license_for(acc: dict, dev: dict):
     dev["license"] = issue_license(dev["serial"], L["plan"], None, L["start"], acc["name"], "حساب " + acc["phone"], end_at=L["end"] if L["plan"] != "revoked" else L["start"])
     dev["accLicVer"] = acc.get("licVer")
     dev["accountId"] = acc["id"]
+
+
+def fmt_size(n: int) -> str:
+    return f"{n / 1048576:.1f} MB" if n >= 1048576 else f"{max(1, round(n / 1024))} KB"
 
 
 def change_stamp(did: str) -> str:
@@ -748,9 +755,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/public/site":
             S = DB["site"]
             m = S["maintenance"]
+            D = S["download"]
+            dl_url, dl_size = S.get("downloadUrl", ""), S.get("fileSize", "")
+            if D["mode"] == "file" and D["file"]:
+                proto = self.headers.get("X-Forwarded-Proto") or "http"
+                dl_url, dl_size = f"{proto}://{self.headers.get('Host', '')}/api/public/download", dl_size or fmt_size(D["size"])
+            elif D["mode"] == "contact":
+                dl_url = ""
             return self.public_json(200, {"ok": True, "maintenance": m if m.get("on") else {"on": False}, "announcement": S["announcement"] if S["announcement"].get("on") else {"on": False},
-                                          "hero": S["hero"], "downloadUrl": S.get("downloadUrl", ""), "version": S.get("version", ""), "fileSize": S.get("fileSize", ""),
+                                          "hero": S["hero"], "downloadMode": D["mode"], "downloadUrl": dl_url, "version": S.get("version", ""), "fileSize": dl_size,
                                           "whatsapp": S.get("whatsapp", ""), "email": S.get("email", ""), "sections": S["sections"]})
+        if path == "/api/public/download":
+            D = DB["site"]["download"]
+            f = os.path.join(SITE_DOWNLOAD, D["file"]) if D["mode"] == "file" and D["file"] else ""
+            if not f or not os.path.isfile(f):
+                return self.public_json(404, {"ok": False, "error": "ملف التحميل غير متوفر حالياً"})
+            with lock:
+                D["downloads"] = D.get("downloads", 0) + 1
+                mark_dirty()
+            return self.send_file(f, D["originalName"] or D["file"])
         if path == "/api/public/track" and method == "POST":
             n = int(self.headers.get("Content-Length", 0) or 0)
             if n > 4000:
@@ -1483,8 +1506,55 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 for k in ("downloadUrl", "version", "fileSize", "whatsapp", "email"):
                     if k in b:
                         S[k] = clean(b[k], 600).strip()
+                if b.get("downloadMode") in ("file", "url", "contact"):
+                    S["download"]["mode"] = b["downloadMode"]
                 audit(u, "تعديل إعدادات الموقع", ("صيانة الموقع مفعّلة" if S["maintenance"]["on"] else ""))
                 save()
+            return self.send_json(200, {"ok": True})
+        if name == "site/download-upload":
+            need("site")
+            orig = os.path.basename(clean(b.get("fileName"), 120)).strip()
+            ext = os.path.splitext(orig)[1].lower()
+            if ext not in (".exe", ".msi", ".zip"):
+                raise ValueError("الملف يجب أن يكون exe أو msi أو zip")
+            raw = base64.b64decode((b.get("data") or "").split(",")[-1])
+            if not raw:
+                raise ValueError("اختر ملف التثبيت")
+            if len(raw) > 150 * 1024 * 1024:
+                raise ValueError("الحد الأقصى 150 MB")
+            fname = uid("dl") + "_" + re.sub(r"[^A-Za-z0-9_.-]", "_", orig)
+            os.makedirs(SITE_DOWNLOAD, exist_ok=True)
+            with open(os.path.join(SITE_DOWNLOAD, fname), "wb") as f:
+                f.write(raw)
+            MONGO.file_saved(os.path.join(SITE_DOWNLOAD, fname))
+            with lock:
+                D = DB["site"]["download"]
+                old = D.get("file")
+                D.update(mode="file", file=fname, originalName=orig, size=len(raw), sha256=hashlib.sha256(raw).hexdigest(), uploaded=now_iso(), downloads=0)
+                DB["site"]["fileSize"] = ""
+                audit(u, "رفع ملف تحميل الموقع", f"{orig} — {fmt_size(len(raw))}")
+                save()
+            if old and old != fname:
+                try:
+                    os.remove(os.path.join(SITE_DOWNLOAD, old))
+                except OSError:
+                    pass
+                MONGO.file_removed(os.path.join(SITE_DOWNLOAD, old))
+            return self.send_json(200, {"ok": True, "download": DB["site"]["download"]})
+        if name == "site/download-delete":
+            need("site")
+            with lock:
+                D = DB["site"]["download"]
+                old = D.get("file")
+                D.update(mode="url", file="", originalName="", size=0, sha256="", uploaded="", downloads=0)
+                audit(u, "حذف ملف تحميل الموقع")
+                save()
+            if old:
+                try:
+                    os.remove(os.path.join(SITE_DOWNLOAD, old))
+                except OSError:
+                    pass
+                MONGO.file_removed(os.path.join(SITE_DOWNLOAD, old))
             return self.send_json(200, {"ok": True})
         if name == "site/clear-visits":
             if not u["owner"]:

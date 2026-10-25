@@ -970,10 +970,19 @@ V.site = async el => {
     if ($('#vClr')) $('#vClr').onclick = async () => { if (await confirmBox('مسح سجل الزوار', 'سيتم حذف كل بيانات الزيارات نهائياً.', true)) { await api('admin/site/clear-visits', {}).catch(fail); go('site'); } };
   } else {
     const { config: S } = await api('admin/site?days=1');
+    const D = S.download || { mode: 'url' };
     box.innerHTML = `<div class="grid g2">
-      <div><h4 class="mb">رابط التحميل والإصدار</h4>
-        <div class="field"><label>رابط تحميل النظام لويندوز (يتقدم على config.js)</label><input class="in ltr" id="sDl" value="${esc(S.downloadUrl)}" placeholder="https://..."></div>
-        <div class="fg"><div class="field"><label>رقم الإصدار</label><input class="in ltr" id="sVer" value="${esc(S.version)}" placeholder="3.0"></div><div class="field"><label>حجم الملف</label><input class="in ltr" id="sSize" value="${esc(S.fileSize)}" placeholder="18 MB"></div></div>
+      <div><h4 class="mb">زر التحميل في الموقع</h4>
+        <div class="field"><label>عند ضغط الزائر على «تحميل»</label><select class="in" id="sDm">
+          <option value="file" ${D.mode === 'file' ? 'selected' : ''}>تحميل ملف التثبيت المرفوع على اللوحة</option>
+          <option value="url" ${D.mode === 'url' ? 'selected' : ''}>فتح رابط أحدده (Google Drive، Dropbox...)</option>
+          <option value="contact" ${D.mode === 'contact' ? 'selected' : ''}>تواصل عبر واتساب لاستلام النسخة</option></select></div>
+        <div data-dm="file"><div class="note t-pr mb">${ic('download')} <div id="sDfInfo">${D.file ? `<b class="ltr">${esc(D.originalName)}</b> — ${fsize(D.size)}<br><span class="small muted">رُفع ${fdt(D.uploaded)} · عدد التحميلات: <b>${D.downloads || 0}</b></span>` : 'لا يوجد ملف مرفوع بعد'}</div></div>
+          <div style="display:flex;gap:8px;align-items:center"><input type="file" class="in" id="sDf" accept=".exe,.msi,.zip" style="flex:1"><button class="btn pr" id="sDfUp">${ic('upload', 'sm')} رفع الملف</button>${D.file ? `<button class="btn dg" id="sDfDel" title="حذف الملف">${ic('trash', 'sm')}</button>` : ''}</div>
+          <div class="small muted mt">ملف التثبيت RawajSetup.exe — يُحفظ في اللوحة ونسخته في MongoDB، والحجم يُحسب تلقائياً.</div></div>
+        <div data-dm="url"><div class="field"><label>رابط التحميل المباشر</label><input class="in ltr" id="sDl" value="${esc(S.downloadUrl)}" placeholder="https://..."></div></div>
+        <div data-dm="contact"><div class="note t-wa">${ic('alert')} <div>يظهر زر «تواصل لاستلام نسخة التحميل» ويفتح واتساب برسالة جاهزة.</div></div></div>
+        <div class="fg mt"><div class="field"><label>رقم الإصدار</label><input class="in ltr" id="sVer" value="${esc(S.version)}" placeholder="3.0"></div><div class="field"><label>حجم الملف (فارغ = تلقائي)</label><input class="in ltr" id="sSize" value="${esc(S.fileSize)}" placeholder="${D.file ? fsize(D.size) : '18 MB'}"></div></div>
         <h4 class="mt mb">التواصل (فارغ = من config.js)</h4><div class="fg"><div class="field"><label>رقم واتساب (دولي)</label><input class="in ltr" id="sWa" value="${esc(S.whatsapp)}" placeholder="9665xxxxxxxx"></div><div class="field"><label>البريد</label><input class="in ltr" id="sEm" value="${esc(S.email)}"></div></div>
         <h4 class="mt mb">نص الواجهة الرئيسية (فارغ = النص الافتراضي)</h4>
         <div class="field"><label>العنوان الرئيسي</label><input class="in" id="sHt" value="${esc(S.hero.title)}" placeholder="أدِر أعمالك بقوة وفخامة من نظام واحد متكامل"></div>
@@ -984,9 +993,23 @@ V.site = async el => {
         <div class="field"><label>رابط (اختياري)</label><input class="in ltr" id="sAL" value="${esc(S.announcement.link)}" placeholder="#plans"></div>
         <div class="note t-wa mt">${ic('alert')} <div>وضع صيانة الموقع من صفحة «الصيانة والإعلانات».</div></div></div></div>
       <button class="btn pr mt" id="sSave">${ic('check', 'sm')} حفظ ونشر على الموقع</button>`;
+    const showDm = () => $$('[data-dm]').forEach(x => { x.hidden = x.dataset.dm !== $('#sDm').value; });
+    $('#sDm').onchange = showDm; showDm();
+    $('#sDfUp').onclick = async () => {
+      const f = $('#sDf').files[0]; if (!f) return toast('اختر ملف التثبيت أولاً', true);
+      if (f.size > 150 * 1048576) return toast('الحد الأقصى 150 MB', true);
+      const b = $('#sDfUp'); b.disabled = true; b.textContent = 'جارٍ الرفع…';
+      try {
+        await api('admin/site/download-upload', { fileName: f.name, data: await fileToDataURL(f) });
+        await api('admin/site/save', { downloadMode: 'file' });
+        toast('تم رفع الملف — زر التحميل في الموقع يحمّله الآن'); go('site');
+      } catch (e) { fail(e); b.disabled = false; b.textContent = 'رفع الملف'; }
+    };
+    if ($('#sDfDel')) $('#sDfDel').onclick = async () => { if (await confirmBox('حذف ملف التحميل', 'سيُحذف الملف من اللوحة ويعود الزر لرابط التحميل.', true)) { await api('admin/site/download-delete', {}).catch(fail); go('site'); } };
     $('#sSave').onclick = () => {
+      if ($('#sDm').value === 'file' && !D.file) return toast('ارفع ملف التثبيت أولاً أو اختر وضعاً آخر', true);
       const sections = {}; $$('[data-sec]').forEach(i => { sections[i.dataset.sec] = i.checked; });
-      api('admin/site/save', { downloadUrl: $('#sDl').value, version: $('#sVer').value, fileSize: $('#sSize').value, whatsapp: $('#sWa').value, email: $('#sEm').value,
+      api('admin/site/save', { downloadMode: $('#sDm').value, downloadUrl: $('#sDl').value, version: $('#sVer').value, fileSize: $('#sSize').value, whatsapp: $('#sWa').value, email: $('#sEm').value,
         hero: { title: $('#sHt').value, subtitle: $('#sHs').value }, sections, announcement: { on: $('#sAOn').checked, text: $('#sAT').value, link: $('#sAL').value } })
         .then(() => toast('تم الحفظ — يظهر في الموقع فوراً')).catch(fail);
     };
