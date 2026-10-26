@@ -146,6 +146,7 @@ const NAV = [
   ['plans', 'tag', 'الباقات وأكواد الخصم', 'sales'],
   ['site', 'globe', 'الموقع والزوار', 'site'],
   ['maintenance', 'tool', 'الصيانة والإعلانات', 'system'],
+  ['branding', 'shield', 'الهوية والدعم', 'system'],
   ['tickets', 'chat', 'الدعم الفني', 'tickets'],
   ['errors', 'bug', 'الأعطال', 'errors'],
   ['notifications', 'bell', 'الإشعارات', 'notifications'],
@@ -291,13 +292,27 @@ async function deviceModal(id) {
       <h4 class="mt mb">أيام النشاط (آخر 60)</h4><div class="chips">${d.activity.map(x => `<span class="badge b-pr">${x.slice(5)}</span>`).join('') || '<span class="muted">—</span>'}</div>`,
     tk: () => table([['الموضوع', t => `<b>${esc(t.subject)}</b>`], ['الحالة', t => ticketBadge(t.status)], ['آخر تحديث', t => fdt(t.updated)]], d.tickets, { click: 1, empty: 'لا توجد تذاكر' }),
     err: () => table([['الوقت', e => fdt(e.time)], ['العطل', e => `<div class="small">${esc(e.message)}</div><div class="xs muted">${esc(e.source)} · ${esc(e.user || '')}</div>`], ['', e => e.resolved ? '<span class="badge b-su">معالج</span>' : '<span class="badge b-da">جديد</span>']], d.errors.slice().reverse(), { empty: 'لا توجد أعطال' }),
-    bk: () => can('backups') ? table([['الملف', b => `<span class="ltr small">${esc(b.name)}</span>`], ['الحجم', b => fsize(b.size)], ['التاريخ', b => fdt(b.time)], ['', b => `<a class="btn sec sm" href="/api/admin/backup/download?device=${d.deviceId}&name=${encodeURIComponent(b.name)}">${ic('download', 'sm')} تنزيل</a>`]], d.backups, { empty: 'لم تصل نسخ احتياطية من هذا الجهاز بعد' }) : '<div class="note t-wa">ليست لديك صلاحية النسخ الاحتياطية</div>'
+    bk: () => can('backups') ? `<div class="note t-pr mb">${ic('upload')} <div><b>إرسال نسخة احتياطية لهذا الجهاز</b><br><span class="small">ارفع ملف نسخة (rawaj-….json أو .json.gz) من جهازك، أو اختر «استعادة» على نسخة من القائمة. يُطلب من العميل التأكيد، ويُحفظ نسخة من بياناته الحالية تلقائياً قبل الاستعادة.</span>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="file" class="in" id="rbF" accept=".json,.gz" style="flex:1"><button class="btn pr" id="rbUp">${ic('send', 'sm')} إرسال للجهاز</button></div></div></div>`
+      + table([['الملف', b => `<span class="ltr small">${esc(b.name)}</span>`], ['الحجم', b => fsize(b.size)], ['التاريخ', b => fdt(b.time)], ['', b => `<a class="btn sec sm" href="/api/admin/backup/download?device=${d.deviceId}&name=${encodeURIComponent(b.name)}">${ic('download', 'sm')} تنزيل</a> <button class="btn sec sm" data-rb="${esc(b.name)}">${ic('refresh', 'sm')} استعادة على الجهاز</button>`]], d.backups, { empty: 'لم تصل نسخ احتياطية من هذا الجهاز بعد' }) : '<div class="note t-wa">ليست لديك صلاحية النسخ الاحتياطية</div>'
   };
   const show = k => {
     $$('#dt button', m.el).forEach(b => b.classList.toggle('on', b.dataset.t === k)); $('#dtb', m.el).innerHTML = tabs[k]();
     if (k === 'info') $('#dSaveN', m.el).onclick = () => api('admin/device/update', { deviceId: d.deviceId, notes: $('#dNotes', m.el).value }).then(() => toast('تم الحفظ')).catch(fail);
     if (k === 'lic' && can('licenses')) bindLicenseForm(m.el, { deviceId: d.deviceId, serial: d.serial, onDone: () => { m.close(); deviceModal(id); } });
     if (k === 'tk') bindRows($('#dtb', m.el), d.tickets, t => ticketModal(t.id));
+    if (k === 'bk' && can('backups')) {
+      const sendRb = async (body, label) => {
+        if (!await confirmBox('إرسال نسخة احتياطية للجهاز', `سيُطلب من العميل استعادة «${esc(label)}» وتستبدل بياناته الحالية بعد حفظ نسخة منها تلقائياً.`, true)) return;
+        api('admin/device/push-backup', { deviceId: d.deviceId, ...body }).then(() => toast('تم الإرسال — تظهر للعميل خلال ثوانٍ إذا كان النظام مفتوحاً')).catch(fail);
+      };
+      $('#rbUp', m.el).onclick = async () => {
+        const f = $('#rbF', m.el).files[0]; if (!f) return toast('اختر ملف النسخة أولاً', true);
+        if (f.size > 80 * 1048576) return toast('الحد الأقصى 80 MB', true);
+        sendRb({ fileName: f.name, data: await fileToDataURL(f) }, f.name);
+      };
+      $$('[data-rb]', m.el).forEach(x => x.onclick = () => sendRb({ fromName: x.dataset.rb }, x.dataset.rb));
+    }
     if (k === 'use') $$('[data-upw]', m.el).forEach(b => b.onclick = () => {
       const pm = modal({ title: `كلمة مرور جديدة — ${esc(b.dataset.upw)}`, body: `<div class="field"><label>كلمة المرور الجديدة</label><div class="flex"><input class="in ltr" id="npw"><button class="btn sec sm" id="npg">توليد</button></div></div>`, footer: `<button class="btn pr" id="nps">${ic('send', 'sm')} حفظ وإرسال للنظام</button><button class="btn sec" data-x>إلغاء</button>` });
       $('#npg', pm.el).onclick = () => { const v = genPassword(); $('#npw', pm.el).value = v; copy(v); };
@@ -1019,6 +1034,36 @@ V.site = async el => {
 /* =====================================================================
    الصيانة والإعلانات
    ===================================================================== */
+/* =====================================================================
+   الهوية والدعم — شعار النظام والموقع وأرقام الدعم (تصل فوراً للنظام والموقع)
+   ===================================================================== */
+V.branding = async el => {
+  const { branding: B } = await api('admin/branding');
+  let logo = B.logo;
+  el.innerHTML = `<div class="grid g2"><div class="card" style="padding:22px"><h4 class="mb">الشعار</h4>
+      <div style="display:flex;gap:18px;align-items:center"><div style="width:120px;height:120px;border-radius:28px;background:var(--bg2,#f1f2f7);display:grid;place-items:center;flex:none;overflow:hidden"><img id="bLogo" src="${esc(logo || '/logo.svg')}" style="width:100%;height:100%;object-fit:contain"></div>
+        <div class="small muted">يظهر في النظام عند كل العملاء (الشريط الجانبي، شاشة الدخول، أيقونة النافذة) وفي الموقع (الشعار والأيقونة).<br>PNG أو SVG مربع، حتى 400KB. الأفضل 512×512 بخلفية شفافة.</div></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:14px"><input type="file" class="in" id="bFile" accept="image/png,image/svg+xml,image/jpeg,image/webp" style="flex:1"><button class="btn sec" id="bReset">${ic('refresh', 'sm')} الشعار الافتراضي</button></div>
+      <div class="note t-wa mt">${ic('alert')} <div class="small">أيقونة ملف التثبيت وأيقونة البرنامج في ويندوز تُحدَّث عند بناء نسخة تثبيت جديدة فقط.</div></div></div>
+    <div class="card" style="padding:22px"><h4 class="mb">بيانات الدعم الفني</h4>
+      <div class="field"><label>رقم الواتساب (دولي بدون +)</label><input class="in ltr" id="bWa" value="${esc(B.whatsapp)}" placeholder="967735999135"></div>
+      <div class="field"><label>الرقم كما يظهر للعملاء</label><input class="in ltr" id="bPl" value="${esc(B.phoneLabel)}" placeholder="+967 735 999 135"></div>
+      <div class="field"><label>بريد الدعم</label><input class="in ltr" id="bEm" value="${esc(B.email)}" placeholder="support@example.com"></div>
+      <div class="small muted">تُستخدم في النظام (خدمة العملاء، التفعيل، رسائل واتساب) وفي الموقع (أزرار التواصل).</div></div></div>
+    <div class="flex mt"><button class="btn pr" id="bSave">${ic('check', 'sm')} حفظ ونشر</button><span class="small muted" style="align-self:center">آخر تحديث: ${fdt(B.updated)} · الإصدار ${B.ver}</span></div>`;
+  $('#bFile').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    if (f.size > 400 * 1024) { e.target.value = ''; return toast('حجم الشعار كبير — الحد 400KB', true); }
+    logo = await fileToDataURL(f); $('#bLogo').src = logo;
+  };
+  $('#bReset').onclick = () => { logo = ''; $('#bLogo').src = '/logo.svg'; $('#bFile').value = ''; };
+  $('#bSave').onclick = () => {
+    const body = { whatsapp: $('#bWa').value, phoneLabel: $('#bPl').value, email: $('#bEm').value };
+    if (logo !== B.logo) body.logo = logo;
+    api('admin/branding/save', body).then(() => { toast('تم الحفظ — يظهر في النظام والموقع خلال ثوانٍ'); go('branding'); }).catch(fail);
+  };
+};
+
 V.maintenance = async el => {
   const r = await api('admin/system'); const Y = r.system, W = r.site;
   const card = (id, title, sub, m, extra) => `<div class="card mnt ${m.on ? 'on' : ''}"><div class="card-h"><h3>${ic('settings')} ${title}</h3>${m.on ? '<span class="badge b-da">الصيانة مفعّلة</span>' : '<span class="badge b-su">يعمل بشكل طبيعي</span>'}</div><div class="card-b">

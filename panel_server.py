@@ -49,7 +49,8 @@ SECRET_FILE = os.path.join(PRIVATE, "keys", "secret.key")
 CREDENTIALS_FILE = os.path.join(PRIVATE, "بيانات الدخول — احذف هذا الملف بعد حفظها.txt")
 PANEL_BACKUPS = os.path.join(DATA, "panel-backups")
 CONTRACTS = os.path.join(DATA, "contracts")
-SITE_DOWNLOAD = os.path.join(DATA, "site-download")  # ملف تثبيت النظام الذي يحمّله زوار الموقع
+SITE_DOWNLOAD = os.path.join(DATA, "site-download")
+RESTORES = os.path.join(DATA, "restores")  # نسخ احتياطية يرسلها الدعم الفني لجهاز عميل لاستعادتها  # ملف تثبيت النظام الذي يحمّله زوار الموقع
 MONGO_CFG = os.path.join(DATA, "mongo.json")
 KEEP_PANEL_BACKUPS = 10
 HOST = os.environ.get("RAWAJ_PANEL_HOST", "0.0.0.0" if HOSTED else "127.0.0.1")
@@ -77,6 +78,8 @@ DEFAULT_SITE = {"maintenance": {"on": False, "message": "نعمل حالياً �
                 # زر التحميل: file = ملف مرفوع على اللوحة، url = رابط تحدده، contact = تواصل واتساب
                 "download": {"mode": "url", "file": "", "originalName": "", "size": 0, "sha256": "", "uploaded": "", "downloads": 0}, "version": "", "fileSize": "", "whatsapp": "", "email": "",
                 "sections": {"features": True, "showcase": True, "security": True, "plans": True, "download": True, "faq": True, "support": True}}
+# هوية النظام والموقع: الشعار وأرقام الدعم — تتغير من اللوحة وتصل للنظام والموقع فوراً
+DEFAULT_BRANDING = {"ver": 1, "logo": "", "whatsapp": "967735999135", "phoneLabel": "+967 735 999 135", "email": "aspreim@gmail.com", "updated": ""}
 DEFAULT_SYSTEM = {"maintenance": {"on": False, "message": "النظام في وضع الصيانة لتحسين الخدمة — سيعود خلال وقت قصير.", "until": ""},
                   "announcement": {"on": False, "text": "", "level": "info", "link": "", "id": ""}}
 # حقول بيانات المنشأة التي يمكن إعدادها للعميل من اللوحة
@@ -259,6 +262,7 @@ def load():
     for k, v in DEFAULT_SITE.items():
         DB["site"].setdefault(k, json.loads(json.dumps(v)))
     DB.setdefault("system", json.loads(json.dumps(DEFAULT_SYSTEM)))
+    DB.setdefault("branding", dict(DEFAULT_BRANDING))
     DB.setdefault("visits", [])
     os.makedirs(CONTRACTS, exist_ok=True)
     DB["settings"].setdefault("backup", {"enabled": True, "dir": PANEL_BACKUPS, "last": ""})
@@ -272,7 +276,7 @@ def load():
         else:
             MONGO.sync_now(full=True)    # قاعدة فارغة: رفع البيانات الحالية لأول مرة
     MONGO.start(lambda: DB)
-    MONGO.init_files(DATA, ("uploads", "client-backups", "updates", "contracts", "site-download"))
+    MONGO.init_files(DATA, ("uploads", "client-backups", "updates", "contracts", "site-download", "restores"))
 
 
 def audit(who: dict, action: str, details: str = "") -> None:
@@ -402,7 +406,7 @@ def change_stamp(did: str) -> str:
         max((n["created"] for n in DB["notifications"] if n["target"] in ("all", did)), default=""),
         max((m["time"] for t in DB["tickets"] if t["deviceId"] == did for m in t["messages"] if m["from"] == "admin"), default=""),
         max((u["created"] for u in DB["updates"]), default=""),
-        DB["system"], DB["prices"], [plan_public(x) for x in active_plans()], DB["settings"].get("payMethods", []),
+        DB["system"], DB["prices"], [plan_public(x) for x in active_plans()], DB["settings"].get("payMethods", []), DB["branding"]["ver"],
         [x.get("id") for x in acc.get("contracts", [])],
     ]
     return hashlib.sha1(json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
@@ -764,7 +768,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 dl_url = ""
             return self.public_json(200, {"ok": True, "maintenance": m if m.get("on") else {"on": False}, "announcement": S["announcement"] if S["announcement"].get("on") else {"on": False},
                                           "hero": S["hero"], "downloadMode": D["mode"], "downloadUrl": dl_url, "version": S.get("version", ""), "fileSize": dl_size,
-                                          "whatsapp": S.get("whatsapp", ""), "email": S.get("email", ""), "sections": S["sections"]})
+                                          "whatsapp": S.get("whatsapp") or DB["branding"]["whatsapp"], "email": S.get("email") or DB["branding"]["email"],
+                                          "phoneLabel": DB["branding"]["phoneLabel"], "logo": DB["branding"]["logo"], "sections": S["sections"]})
         if path == "/api/public/download":
             D = DB["site"]["download"]
             f = os.path.join(SITE_DOWNLOAD, D["file"]) if D["mode"] == "file" and D["file"] else ""
@@ -920,6 +925,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 DB["requests"].append(req)
                 save()
                 return self.send_json(200, {"ok": True, "requestId": req["id"]})
+            if path == "/api/client/restore-file":
+                # فقط الجهاز الموجّهة له النسخة يستطيع تنزيلها
+                rid = re.sub(r"[^A-Za-z0-9_]", "", clean(b.get("rid"), 60))
+                if not any(x.get("type") == "restore" and x.get("rid") == rid for x in dev.get("pushes", [])):
+                    return self.send_json(404, {"ok": False, "error": "النسخة غير متاحة"})
+                return self.send_file(os.path.join(RESTORES, rid + ".json.gz"), rid + ".json.gz", "application/gzip")
             if path == "/api/client/contracts":
                 acc = next((a for a in DB["accounts"] if did in a.get("devices", [])), None)
                 save()
@@ -969,6 +980,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                             "system": {"maintenance": DB["system"]["maintenance"] if DB["system"]["maintenance"].get("on") else {"on": False},
                                                        "announcement": DB["system"]["announcement"] if DB["system"]["announcement"].get("on") else {"on": False}},
                                             "plans": [plan_public(x) for x in active_plans()], "payMethods": DB["settings"].get("payMethods", []),
+                                            "branding": DB["branding"] if b.get("brandVer") != DB["branding"]["ver"] else None,
                                             "contracts": [{k: x[k] for k in ("id", "no", "created", "plan")} for x in (acc or {}).get("contracts", [])]})
             if path == "/api/client/account-login":
                 ip = self.ip()
@@ -1292,6 +1304,71 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_json(200, {"ok": True, "license": licrec})
 
         # ---------------- إدارة الأجهزة عن بعد: كلمات المرور وإعداد النشاط ----------------
+        if name == "branding":
+            need("system")
+            return self.send_json(200, {"ok": True, "branding": DB["branding"]})
+        if name == "branding/save":
+            need("system")
+            with lock:
+                B = DB["branding"]
+                if "whatsapp" in b:
+                    wa = re.sub(r"\D", "", clean(b.get("whatsapp"), 30))
+                    if not re.fullmatch(r"\d{8,15}", wa):
+                        raise ValueError("رقم الواتساب بالصيغة الدولية بدون + (مثال 9677xxxxxxxx)")
+                    B["whatsapp"] = wa
+                if "phoneLabel" in b:
+                    B["phoneLabel"] = clean(b.get("phoneLabel"), 40).strip() or ("+" + B["whatsapp"])
+                if "email" in b:
+                    em = clean(b.get("email"), 120).strip()
+                    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", em):
+                        raise ValueError("بريد إلكتروني غير صحيح")
+                    B["email"] = em
+                if "logo" in b:
+                    logo = b.get("logo") or ""
+                    if logo and not re.match(r"^data:image/(png|svg\+xml|jpeg|webp);base64,[A-Za-z0-9+/=]+$", logo):
+                        raise ValueError("الشعار يجب أن يكون صورة PNG أو SVG أو JPG أو WebP")
+                    if len(logo) > 600_000:
+                        raise ValueError("حجم الشعار كبير — الحد 400KB")
+                    B["logo"] = logo
+                B["ver"] = B.get("ver", 1) + 1
+                B["updated"] = now_iso()
+                audit(u, "تعديل هوية النظام والدعم", f"{B['phoneLabel']} · {B['email']}" + (" · شعار جديد" if "logo" in b else ""))
+                save()
+            return self.send_json(200, {"ok": True, "branding": DB["branding"]})
+        if name == "device/push-backup":
+            need("backups")
+            d = DB["devices"].get(clean(b.get("deviceId"), 64))
+            if not d:
+                return self.send_json(404, {"ok": False, "error": "الجهاز غير موجود"})
+            if b.get("fromName"):  # نسخة سابقة وصلت من نفس الجهاز
+                n = os.path.basename(clean(b.get("fromName"), 120))
+                with open(os.path.join(BACKUPS, d["deviceId"], n), "rb") as f:
+                    raw, orig = f.read(), n
+            else:  # ملف من جهاز المالك
+                raw = base64.b64decode((b.get("data") or "").split(",")[-1])
+                orig = os.path.basename(clean(b.get("fileName"), 120)) or "backup.json"
+            if not raw or len(raw) > 80 * 1024 * 1024:
+                raise ValueError("اختر ملف نسخة احتياطية صالح (حتى 80MB)")
+            body = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+            try:
+                data = json.loads(body.decode("utf-8-sig"))
+            except Exception:
+                raise ValueError("الملف ليس نسخة احتياطية لنظام رواج (JSON غير صالح)")
+            if not isinstance(data, dict) or not isinstance(data.get("settings"), dict) or "sales" not in data:
+                raise ValueError("الملف ليس نسخة احتياطية لنظام رواج")
+            rid = uid("rst")
+            os.makedirs(RESTORES, exist_ok=True)
+            path_ = os.path.join(RESTORES, rid + ".json.gz")
+            with open(path_, "wb") as f:
+                f.write(gzip.compress(json.dumps(data, ensure_ascii=False).encode("utf-8")))
+            MONGO.file_saved(path_)
+            with lock:
+                d["pushes"] = [x for x in d.get("pushes", []) if x.get("type") != "restore"]  # نسخة واحدة معلّقة فقط
+                push(d, {"type": "restore", "rid": rid, "name": orig, "size": len(body), "by": u["name"],
+                         "company": clean((data.get("settings") or {}).get("company"), 120), "sales": len(data.get("sales") or [])})
+                audit(u, "إرسال نسخة احتياطية لجهاز", f"{d.get('serial')} — {orig}")
+                save()
+            return self.send_json(200, {"ok": True, "rid": rid})
         if name == "device/push-password":
             need("accounts")
             pw = clean(b.get("password"), 200)
