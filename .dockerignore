@@ -1,0 +1,12 @@
+private/
+keys/
+panel-data/
+.env
+*.env
+بيانات الدخول*.txt
+أسرار-الاستضافة*.txt
+__pycache__/
+*.pyc
+*.lnk
+*.bat
+.git/

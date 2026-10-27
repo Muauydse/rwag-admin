@@ -394,6 +394,13 @@ def fmt_size(n: int) -> str:
     return f"{n / 1048576:.1f} MB" if n >= 1048576 else f"{max(1, round(n / 1024))} KB"
 
 
+def device_features(dev: dict) -> dict:
+    """مزايا مفعّلة لهذا الجهاز من اللوحة (الافتراضي من الإعدادات العامة)"""
+    default = (DB["settings"].get("featuresDefault") or {})
+    f = dev.get("features") or {}
+    return {"zatca": bool(f.get("zatca", default.get("zatca", False)))}
+
+
 def change_stamp(did: str) -> str:
     """بصمة لكل ما يصل للجهاز في المزامنة: إذا تغيّرت يعرف النظام المفتوح أن هناك تعديلاً فيزامن فوراً"""
     dev = DB["devices"].get(did) or {}
@@ -406,7 +413,7 @@ def change_stamp(did: str) -> str:
         max((n["created"] for n in DB["notifications"] if n["target"] in ("all", did)), default=""),
         max((m["time"] for t in DB["tickets"] if t["deviceId"] == did for m in t["messages"] if m["from"] == "admin"), default=""),
         max((u["created"] for u in DB["updates"]), default=""),
-        DB["system"], DB["prices"], [plan_public(x) for x in active_plans()], DB["settings"].get("payMethods", []), DB["branding"]["ver"],
+        DB["system"], DB["prices"], [plan_public(x) for x in active_plans()], DB["settings"].get("payMethods", []), DB["branding"]["ver"], device_features(dev),
         [x.get("id") for x in acc.get("contracts", [])],
     ]
     return hashlib.sha1(json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
@@ -943,7 +950,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.send_file(os.path.join(CONTRACTS, acc["id"], rec["file"]), rec["file"], "application/pdf")
             if path == "/api/client/sync":
                 dev["syncCount"] = dev.get("syncCount", 0) + 1
-                for k in ("company", "stats", "users", "trial", "mode", "account", "localLicense"):
+                for k in ("company", "stats", "users", "trial", "mode", "account", "localLicense", "zatca"):
                     if k in b:
                         dev[k] = b[k]
                 acks = set(b.get("acks") or [])
@@ -981,6 +988,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                                        "announcement": DB["system"]["announcement"] if DB["system"]["announcement"].get("on") else {"on": False}},
                                             "plans": [plan_public(x) for x in active_plans()], "payMethods": DB["settings"].get("payMethods", []),
                                             "branding": DB["branding"] if b.get("brandVer") != DB["branding"]["ver"] else None,
+                                            "features": device_features(dev),
                                             "contracts": [{k: x[k] for k in ("id", "no", "created", "plan")} for x in (acc or {}).get("contracts", [])]})
             if path == "/api/client/account-login":
                 ip = self.ip()
@@ -1238,6 +1246,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             x["tickets"] = [{k: t[k] for k in ("id", "subject", "status", "updated")} for t in DB["tickets"] if t["deviceId"] == d["deviceId"]]
             x["errors"] = [e for e in DB["errors"] if e["deviceId"] == d["deviceId"]][-30:]
             x["backups"] = self.backups_of(d["deviceId"])
+            x["featuresOn"] = device_features(d)
             x["activity"] = sorted({e["t"][:10] for e in DB["events"] if e["d"] == d["deviceId"]})[-60:]
             if not u["owner"] and "licenses" not in u["perms"] and x.get("license"):
                 x["license"].pop("token", None)
@@ -1335,6 +1344,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 audit(u, "تعديل هوية النظام والدعم", f"{B['phoneLabel']} · {B['email']}" + (" · شعار جديد" if "logo" in b else ""))
                 save()
             return self.send_json(200, {"ok": True, "branding": DB["branding"]})
+        if name == "device/features":
+            need("devices")
+            with lock:
+                d = DB["devices"].get(clean(b.get("deviceId"), 64))
+                if not d:
+                    return self.send_json(404, {"ok": False, "error": "الجهاز غير موجود"})
+                f = d.setdefault("features", {})
+                if "zatca" in b:
+                    f["zatca"] = bool(b["zatca"])
+                    audit(u, ("تفعيل" if f["zatca"] else "إيقاف") + " الفوترة الإلكترونية لجهاز", d.get("serial") or d["deviceId"])
+                save()
+            return self.send_json(200, {"ok": True, "features": device_features(d)})
         if name == "device/push-backup":
             need("backups")
             d = DB["devices"].get(clean(b.get("deviceId"), 64))

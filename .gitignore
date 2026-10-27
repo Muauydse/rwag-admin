@@ -1,0 +1,19 @@
+# ⚠️ أسرار وبيانات — لا تُرفع إلى GitHub أبداً
+# (مكانها الآن مجلد «لوحة التحكم - ملفات خاصة» خارج هذا المجلد — هذه القواعد احتياط إضافي)
+private/
+keys/
+panel-data/
+.env
+*.env
+بيانات الدخول*.txt
+أسرار-الاستضافة*.txt
+secrets*.txt
+
+# ملفات محلية
+__pycache__/
+*.pyc
+*.lnk
+*.log
+.claude/
+Thumbs.db
+desktop.ini
