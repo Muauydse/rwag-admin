@@ -105,6 +105,16 @@ OWNER_ONLY = {"staff", "settings", "audit"}  # صلاحيات للمالك فق�
 PLANS = {"monthly": ("شهري", 30), "quarterly": ("ربع سنوي", 90), "yearly": ("سنوي", 365), "lifetime": ("دائم", None), "custom": ("مخصص", None), "revoked": ("موقوف", 0)}
 
 lock = threading.RLock()
+TYPING = {}  # (ticketId, "client"|"admin") -> وقت آخر كتابة — مؤشر «يكتب الآن» في المحادثة المباشرة (في الذاكرة فقط)
+
+
+def is_typing(tid: str, who: str) -> bool:
+    return time.time() - TYPING.get((tid, who), 0) < 6
+
+
+def chat_view(t: dict) -> list:
+    """رسائل المحادثة للنظام: بدون مسارات الصور (يكفي عددها)"""
+    return [{k: m.get(k) for k in ("id", "from", "name", "text", "time")} | {"images": len(m.get("images") or [])} for m in t["messages"]]
 DB = None
 SESSIONS = {}
 LOGIN_FAILS = {}
@@ -399,6 +409,17 @@ def device_features(dev: dict) -> dict:
     default = (DB["settings"].get("featuresDefault") or {})
     f = dev.get("features") or {}
     return {"zatca": bool(f.get("zatca", default.get("zatca", False)))}
+
+
+def signup_missing(cu: dict) -> list:
+    """طلب الاشتراك: اسم النشاط + الجوال + البريد (والباقي يُكمله العميل في إعداد النظام بعد التفعيل)"""
+    bad = [n for k, n in (("company", "اسم النشاط"), ("mobile", "رقم الجوال"), ("email", "البريد الإلكتروني")) if not cu[k]]
+    if cu["mobile"] and not re.fullmatch(r"\d{9,15}", cu["mobile"]):
+        bad.append("رقم جوال صحيح")
+    if cu["email"] and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", cu["email"]):
+        bad.append("بريد إلكتروني صحيح")
+    cu["ownerName"] = cu["ownerName"] or cu["company"]  # الاسم في الطلبات والحسابات
+    return bad
 
 
 def change_stamp(did: str) -> str:
@@ -822,16 +843,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                                                                          "vatNumber", "crNumber", "employees", "branches", "payMethod", "contactTime", "notes", "legalName", "postalCode", "buildingNo", "street")}
                 cu["mobile"] = norm_phone(cu["mobile"])
                 plan = next((x for x in active_plans() if x["id"] == b.get("planId")), None)
-                missing = [n for k, n in (("ownerName", "الاسم"), ("mobile", "رقم الجوال"), ("company", "اسم المنشأة"), ("activity", "النشاط"), ("city", "المدينة")) if not cu[k]]
-                if missing or not plan or not re.fullmatch(r"\d{9,15}", cu["mobile"]):
-                    return self.public_json(400, {"ok": False, "error": "أكمل: " + "، ".join(missing or (["الباقة"] if not plan else ["رقم جوال صحيح"]))})
+                bad = signup_missing(cu)
+                if bad or not plan:
+                    return self.public_json(400, {"ok": False, "error": "أكمل: " + "، ".join(bad or ["الباقة"])})
+                # الرقم التسلسلي (اختياري من الموقع): يربط الطلب بجهاز العميل إن كان مثبتاً
+                serial = clean(b.get("serial"), 40).strip().upper()
+                sdev = next((d for d in DB["devices"].values() if serial and (d.get("serial") or "").upper() == serial), None)
                 try:
                     c, disc, final = coupon_apply(b.get("coupon"), plan)
                 except ValueError:
                     c, disc, final = None, 0.0, float(plan["price"])
                 req = {"id": uid("req"), "created": now_iso(), "status": "new", "source": "website", "planId": plan["id"], "planName": plan["name"], "planType": plan["type"], "days": plan.get("days"),
                        "price": float(plan["price"]), "coupon": c["code"] if c else "", "discount": disc, "final": final, "currency": DB["prices"].get("currency", "ر.س"),
-                       "customer": cu, "deviceId": None, "serial": "", "ip": ip, "notes": "", "history": [{"time": now_iso(), "by": "العميل", "action": "إرسال الطلب من الموقع"}]}
+                       "customer": cu, "deviceId": sdev["deviceId"] if sdev else None, "serial": sdev["serial"] if sdev else serial, "ip": ip, "notes": "", "history": [{"time": now_iso(), "by": "العميل", "action": "إرسال الطلب من الموقع"}]}
                 DB["requests"].append(req)
                 save()
                 return self.public_json(200, {"ok": True, "requestId": req["id"]})
@@ -895,6 +919,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with lock:
                 stamp = change_stamp(did)
             return self.send_json(200, {"ok": True, "stamp": stamp})
+        if path == "/api/client/ticket-poll":
+            # المحادثة المفتوحة في النظام: كل 3 ثوانٍ — الرسائل الجديدة، القراءة، «يكتب الآن» (بدون حفظ)
+            did = clean((b.get("device") or {}).get("deviceId"), 64)
+            with lock:
+                t = next((x for x in DB["tickets"] if x["id"] == b.get("ticketId") and x["deviceId"] == did), None)
+                if not t:
+                    return self.send_json(404, {"ok": False, "error": "المحادثة غير موجودة"})
+                t["clientSeen"] = now_iso()
+                if b.get("typing"):
+                    TYPING[(t["id"], "client")] = time.time()
+                return self.send_json(200, {"ok": True, "status": t["status"], "messages": chat_view(t), "adminSeen": t.get("adminSeen", ""),
+                                            "adminTyping": is_typing(t["id"], "admin")})
         with lock:
             dev = touch_device(b.get("device") or {}, self.ip())
             did = dev["deviceId"]
@@ -919,9 +955,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                                                                          "vatNumber", "crNumber", "employees", "branches", "payMethod", "contactTime", "notes", "legalName", "postalCode", "buildingNo", "street")}
                 cu["mobile"] = norm_phone(cu["mobile"])
                 plan = next((x for x in active_plans() if x["id"] == b.get("planId")), None)
-                missing = [n for k, n in (("ownerName", "الاسم"), ("mobile", "رقم الجوال"), ("company", "اسم المنشأة"), ("activity", "النشاط"), ("city", "المدينة")) if not cu[k]]
-                if missing or not plan:
-                    return self.send_json(400, {"ok": False, "error": "أكمل: " + "، ".join(missing or ["الباقة"])})
+                bad = signup_missing(cu)
+                if bad or not plan:
+                    return self.send_json(400, {"ok": False, "error": "أكمل: " + "، ".join(bad or ["الباقة"])})
                 try:
                     c, disc, final = coupon_apply(b.get("coupon"), plan)
                 except ValueError:
@@ -1034,6 +1070,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 imgs = [n for n in (save_image(x, "tk") for x in (b.get("images") or [])[:6]) if n]
                 t["messages"].append({"id": uid("m"), "from": "client", "name": clean(b.get("userName"), 120), "text": clean(b.get("message"), 8000), "images": imgs, "time": now_iso()})
                 t["status"], t["updated"], t["unread"] = "open", now_iso(), True
+                TYPING.pop((t["id"], "client"), None)
                 save()
                 return self.send_json(200, {"ok": True})
             if path == "/api/client/error":
@@ -2013,8 +2050,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if t.get("unread"):
                 t["unread"] = False
                 save()
+            t["adminSeen"] = now_iso()
+            if q.get("live"):  # تحديث المحادثة المفتوحة في اللوحة
+                return self.send_json(200, {"ok": True, "status": t["status"], "messages": t["messages"], "clientSeen": t.get("clientSeen", ""), "clientTyping": is_typing(t["id"], "client")})
             dev = DB["devices"].get(t["deviceId"], {})
-            return self.send_json(200, {"ok": True, "item": t, "device": {k: dev.get(k) for k in ("serial", "subscriptionNo", "company", "computer", "lastSeen")} | {"status": license_status(dev.get("license"))}})
+            return self.send_json(200, {"ok": True, "item": t, "clientTyping": is_typing(t["id"], "client"), "device":{k: dev.get(k) for k in ("serial", "subscriptionNo", "company", "computer", "lastSeen")} | {"status": license_status(dev.get("license"))}})
+        if name == "ticket/typing":
+            need("tickets")
+            TYPING[(clean(b.get("id"), 40), "admin")] = time.time()
+            return self.send_json(200, {"ok": True})
         if name == "ticket/reply":
             need("tickets")
             with lock:
@@ -2023,6 +2067,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return self.send_json(404, {"ok": False})
                 if clean(b.get("text")).strip():
                     t["messages"].append({"id": uid("m"), "from": "admin", "name": u["name"], "text": clean(b.get("text"), 8000), "images": [], "time": now_iso()})
+                    TYPING.pop((t["id"], "admin"), None)
                 t["status"] = b.get("status") or "answered"
                 t["updated"] = now_iso()
                 audit(u, "رد على تذكرة", t["subject"])

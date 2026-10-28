@@ -280,6 +280,9 @@ async function deviceModal(id) {
       ['الرقم التسلسلي', `<span class="ltr">${esc(d.serial)}</span>`], ['رقم الاشتراك', `<span class="ltr">${esc(d.subscriptionNo)}</span>`], ['اسم الجهاز', esc(d.computer)], ['مستخدم ويندوز', esc(d.winUser)], ['نظام التشغيل', `<span class="ltr small">${esc(d.os)}</span>`],
       ['إصدار النظام', `<span class="ltr">${esc(d.appVersion)}</span>`], ['عنوان IP', `<span class="ltr">${esc(d.ip)}</span>`], ['أول ظهور', fdt(d.firstSeen)], ['آخر اتصال', fdt(d.lastSeen) + ' · ' + ago(d.lastSeen)], ['آخر نسخة احتياطية', fdt(d.lastBackup)],
       ['الحساب الحالي', esc((d.account || {}).fullName || (d.mode === 'guest' ? 'زائر (تجربة مجانية)' : ''))]])
+      + `<div class="card mt" style="padding:16px 18px"><h4 class="mb">المزايا الإضافية</h4>
+        <label class="check" style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="fZatca" ${d.featuresOn && d.featuresOn.zatca ? 'checked' : ''} ${can('devices') ? '' : 'disabled'}> <b>الفوترة الإلكترونية — الربط مع هيئة الزكاة (المرحلة الثانية)</b></label>
+        <div class="small muted mt">${d.zatca ? (d.zatca.onboarded ? `مربوط بالهيئة — ${esc({ sandbox: 'بيئة المطورين', simulation: 'المحاكاة', production: 'الإنتاج' }[d.zatca.env] || '')} · فواتير مرسلة: ${fnum(d.zatca.sent || 0)} · بانتظار الإرسال: ${fnum(d.zatca.pending || 0)} · مرفوضة: ${fnum(d.zatca.rejected || 0)}` : 'مفعّلة — لم يربط العميل جهازه بالهيئة بعد') : 'يظهر للعميل قسم «الفواتير الإلكترونية» فور التفعيل (خلال ثوانٍ إن كان النظام مفتوحاً).'}</div></div>`
       + `<div class="field mt"><label>ملاحظات داخلية</label><textarea class="ta" id="dNotes" rows="3">${esc(d.notes)}</textarea></div><button class="btn sec sm" id="dSaveN">${ic('check', 'sm')} حفظ الملاحظات</button>`,
     lic: () => `<div class="grid g2"><div><h4 class="mb">الحالة الحالية</h4>${kv([['الباقة', statusBadge(d.status)], ['بداية الاشتراك', fdate((d.license || {}).start)], ['نهاية الاشتراك', d.license ? (d.license.end ? fdate(d.license.end) : 'دائم') : '—'], ['المتبقي', d.status.remainingDays != null ? Math.ceil(d.status.remainingDays) + ' يوم' : d.license && d.status.active ? 'غير محدود' : '—'],
         ['الفترة التجريبية', d.trial && d.trial.started ? (d.trial.expired ? 'منتهية' : `متبقي ${Math.ceil(d.trial.remaining / 3600)} ساعة`) : 'لم تبدأ']])}
@@ -298,6 +301,7 @@ async function deviceModal(id) {
   };
   const show = k => {
     $$('#dt button', m.el).forEach(b => b.classList.toggle('on', b.dataset.t === k)); $('#dtb', m.el).innerHTML = tabs[k]();
+    if (k === 'info' && $('#fZatca', m.el)) $('#fZatca', m.el).onchange = e => api('admin/device/features', { deviceId: d.deviceId, zatca: e.target.checked }).then(() => toast(e.target.checked ? 'تم تفعيل الفوترة الإلكترونية — تظهر للعميل خلال ثوانٍ' : 'تم إيقاف الفوترة الإلكترونية')).catch(fail);
     if (k === 'info') $('#dSaveN', m.el).onclick = () => api('admin/device/update', { deviceId: d.deviceId, notes: $('#dNotes', m.el).value }).then(() => toast('تم الحفظ')).catch(fail);
     if (k === 'lic' && can('licenses')) bindLicenseForm(m.el, { deviceId: d.deviceId, serial: d.serial, onDone: () => { m.close(); deviceModal(id); } });
     if (k === 'tk') bindRows($('#dtb', m.el), d.tickets, t => ticketModal(t.id));
@@ -407,19 +411,46 @@ V.tickets = async el => {
 async function ticketModal(id) {
   const { item: t, device: dv } = await api('admin/ticket?id=' + id);
   const phone = (t.phone || '').replace(/[^\d]/g, '').replace(/^0/, '966');
+  const live = t.deviceId !== 'website';  // محادثة مباشرة مع النظام (رسائل الموقع يُرد عليها بواتساب أو البريد)
+  const msgHTML = x => `<div class="msg ${x.from}" data-mid="${x.id}">${esc(x.text)}${(x.images || []).map(n => `<img src="/api/admin/file?name=${encodeURIComponent(n)}" data-img>`).join('')}<div class="meta">${esc(x.name || '')} · ${fdt(x.time)}<span class="seen"></span></div></div>`;
   const m = modal({
     title: esc(t.subject), size: 'lg',
-    body: `<div class="flex wrap mb small"><span>${esc(t.userName)}</span>·<span>${esc(t.company || '')}</span>·<span class="ltr">${esc(t.serial)}</span>·${ticketBadge(t.status)}·${statusBadge(dv.status)}<span class="f1"></span>
+    body: `<div class="flex wrap mb small"><span>${esc(t.userName)}</span>·<span>${esc(t.company || '')}</span>·<span class="ltr">${esc(t.serial)}</span>·<span id="tSt">${ticketBadge(t.status)}</span>·${statusBadge(dv.status)}<span class="f1"></span>
         ${phone ? `<a class="btn wa sm" target="_blank" href="https://wa.me/${phone}">${ic('wa', 'sm')} واتساب العميل</a>` : ''}${t.email ? `<a class="btn sec sm" href="mailto:${esc(t.email)}">${ic('mail', 'sm')} بريد</a>` : ''}</div>
-      <div class="chat" id="chat">${t.messages.map(x => `<div class="msg ${x.from}">${esc(x.text)}${(x.images || []).map(n => `<img src="/api/admin/file?name=${encodeURIComponent(n)}" data-img>`).join('')}<div class="meta">${esc(x.name || '')} · ${fdt(x.time)}</div></div>`).join('')}</div>
-      <div class="field mt"><label>الرد على العميل</label><textarea class="ta" id="rp" rows="3" placeholder="اكتب ردك — يظهر للعميل في إشعارات النظام"></textarea></div>`,
-    footer: `<button class="btn pr" id="sR">${ic('send', 'sm')} إرسال الرد</button><button class="btn sec" id="sC">${t.status === 'closed' ? 'إعادة فتح' : 'إغلاق التذكرة'}</button><span class="f1"></span>${t.deviceId === 'website' ? '<span class="small muted">رسالة من الموقع — الرد عبر واتساب أو البريد</span>' : '<button class="btn sec" id="sD">بيانات الجهاز</button>'}`
+      <div class="chat" id="chat">${t.messages.map(msgHTML).join('')}</div><div class="typing" id="tTy" hidden><i></i><i></i><i></i> العميل يكتب الآن…</div>
+      <div class="chat-in mt"><textarea class="ta" id="rp" rows="2" placeholder="${live ? 'اكتب ردك — يصل للعميل فوراً داخل المحادثة (Enter للإرسال، Shift+Enter لسطر جديد)' : 'اكتب ردك'}"></textarea><button class="btn pr" id="sR" title="إرسال">${ic('send', 'sm')}</button></div>
+      ${live ? '<div class="xs muted mt"><span class="live-dot"></span> محادثة مباشرة — تتحدث تلقائياً</div>' : ''}`,
+    footer: `<button class="btn sec" id="sC">${t.status === 'closed' ? 'إعادة فتح' : 'إغلاق التذكرة'}</button><span class="f1"></span>${live ? '<button class="btn sec" id="sD">بيانات الجهاز</button>' : '<span class="small muted">رسالة من الموقع — الرد عبر واتساب أو البريد</span>'}`
   });
-  const ch = $('#chat', m.el); ch.scrollTop = ch.scrollHeight;
-  $$('[data-img]', m.el).forEach(img => img.onclick = () => window.open(img.src, '_blank'));
-  $('#sR', m.el).onclick = async () => { const text = $('#rp', m.el).value.trim(); if (!text) return toast('اكتب الرد', true); try { await api('admin/ticket/reply', { id, text, status: 'answered' }); toast('تم إرسال الرد'); m.close(); ticketModal(id); if (ROUTE === 'tickets') go('tickets'); } catch (e) { fail(e); } };
+  const ch = $('#chat', m.el), rp = $('#rp', m.el); ch.scrollTop = ch.scrollHeight; rp.focus();
+  const bindImgs = () => $$('[data-img]', m.el).forEach(img => img.onclick = () => window.open(img.src, '_blank'));
+  const seen = at => $$('.msg.admin', ch).forEach(x => { const msg = t.messages.find(y => y.id === x.dataset.mid); x.querySelector('.seen').textContent = msg && at && at > msg.time ? ' · ✓✓ قرأها العميل' : ''; });
+  const merge = list => {
+    const near = ch.scrollHeight - ch.scrollTop - ch.clientHeight < 80; let added = 0;
+    list.forEach(x => { if (!t.messages.some(y => y.id === x.id)) { t.messages.push(x); ch.insertAdjacentHTML('beforeend', msgHTML(x)); added++; } });
+    if (added) { bindImgs(); if (near) ch.scrollTop = ch.scrollHeight; }
+    return added;
+  };
+  bindImgs(); seen(t.clientSeen);
+  const send = async () => {
+    const text = rp.value.trim(); if (!text) return;
+    rp.value = ''; rp.focus();
+    try { await api('admin/ticket/reply', { id, text, status: 'answered' }); await poll(); ch.scrollTop = ch.scrollHeight; if (ROUTE === 'tickets') go('tickets'); }
+    catch (e) { rp.value = text; fail(e); }
+  };
+  $('#sR', m.el).onclick = send;
+  let lastType = 0;
+  rp.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+  rp.addEventListener('input', () => { if (live && Date.now() - lastType > 3000) { lastType = Date.now(); api('admin/ticket/typing', { id }).catch(() => { }); } });
   $('#sC', m.el).onclick = async () => { await api('admin/ticket/reply', { id, text: '', status: t.status === 'closed' ? 'open' : 'closed' }).catch(fail); m.close(); go(ROUTE); };
   if ($('#sD', m.el)) $('#sD', m.el).onclick = () => { m.close(); deviceModal(t.deviceId); };
+  const poll = async () => {
+    const r = await api('admin/ticket?live=1&id=' + id).catch(() => null); if (!r) return;
+    if (merge(r.messages)) refreshBadges();
+    t.status = r.status; $('#tSt', m.el).innerHTML = ticketBadge(r.status);
+    $('#tTy', m.el).hidden = !r.clientTyping; seen(r.clientSeen);
+  };
+  if (live) { const timer = setInterval(() => { if (!document.contains(m.el)) return clearInterval(timer); if (!document.hidden) poll(); }, 3000); }
   refreshBadges();
 }
 
@@ -768,12 +799,12 @@ V.requests = async el => {
     const rows = items.filter(r => !RF_ || r.status === RF_);
     $('#tbl').innerHTML = table([
       ['التاريخ', r => `<span class="small">${fdt(r.created)}</span><div class="xs muted">${ago(r.created)}</div>`],
-      ['المنشأة', r => `<b>${esc(r.customer.company)}</b>${r.source === 'website' ? ' <span class="badge b-in">من الموقع</span>' : ''}<div class="xs muted">${esc(r.customer.activity)} · ${esc(r.customer.city)}</div>`],
-      ['العميل', r => `${esc(r.customer.ownerName)}<div class="xs muted ltr">${esc(r.customer.mobile)}</div>`],
+      ['المنشأة', r => `<b>${esc(r.customer.company)}</b>${r.source === 'website' ? ' <span class="badge b-in">من الموقع</span>' : ''}<div class="xs muted ltr">${esc(r.serial || 'بدون رقم تسلسلي')}</div>`],
+      ['التواصل', r => `<span class="ltr">${esc(r.customer.mobile)}</span><div class="xs muted ltr">${esc(r.customer.email || '')}</div>`],
       ['الباقة', r => `<span class="badge b-pr">${esc(r.planName)}</span>${r.coupon ? ` <span class="badge b-vi">${esc(r.coupon)}</span>` : ''}`],
       ['المبلغ', r => `<b>${money(r.final)}</b>${r.discount ? `<div class="xs muted" style="text-decoration:line-through">${money(r.price)}</div>` : ''}`],
       ['الحالة', r => reqBadge(r.status)], ['', r => `<button class="btn wa sm" data-wa="${r.id}">${ic('wa', 'sm')}</button> <button class="btn sec sm" data-o="${r.id}">فتح</button>`]
-    ], rows, { click: 1, empty: 'لا توجد طلبات', emptySub: 'طلبات «اشترك الآن» من شاشة الدخول في النظام تظهر هنا' });
+    ], rows, { click: 1, empty: 'لا توجد طلبات', emptySub: 'طلبات «اشترك الآن» من النظام والموقع تظهر هنا: اسم النشاط والجوال والبريد مع الرقم التسلسلي' });
     bindRows($('#tbl'), rows, r => requestModal(r));
     $$('[data-wa]').forEach(b => b.onclick = () => waComposer(items.find(r => r.id === b.dataset.wa)));
     $$('[data-o]').forEach(b => b.onclick = () => requestModal(items.find(r => r.id === b.dataset.o)));
@@ -803,9 +834,9 @@ function requestModal(r) {
   const m = modal({
     title: `طلب فتح حساب — ${esc(c.company)} ${reqBadge(r.status)}`, size: 'xl',
     body: `<div class="grid g2"><div>
-        <h4 class="mb">بيانات العميل والمنشأة</h4>${kv([['الاسم', esc(c.ownerName)], ['الجوال (رقم التفعيل)', `<span class="ltr">${esc(c.mobile)}</span>`], ['البريد', `<span class="ltr">${esc(c.email)}</span>`], ['المنشأة', esc(c.company)], ['الاسم الإنجليزي', esc(c.companyEn)], ['النشاط', esc(c.activity)],
+        <h4 class="mb">بيانات العميل والمنشأة</h4>${kv([['اسم النشاط', esc(c.company)], ['الاسم', c.ownerName !== c.company ? esc(c.ownerName) : ''], ['الجوال (رقم التفعيل)', `<span class="ltr">${esc(c.mobile)}</span>`], ['البريد', `<span class="ltr">${esc(c.email)}</span>`], ['الاسم الإنجليزي', esc(c.companyEn)], ['النشاط', esc(c.activity)],
           ['المدينة', esc(c.city)], ['الحي', esc(c.district)], ['العنوان', esc(c.address)], ['الرقم الضريبي', `<span class="ltr">${esc(c.vatNumber)}</span>`], ['السجل التجاري', `<span class="ltr">${esc(c.crNumber)}</span>`], ['عدد الموظفين', esc(c.employees)], ['عدد الفروع', esc(c.branches)],
-          ['طريقة الدفع المفضلة', esc(c.payMethod)], ['وقت التواصل', esc(c.contactTime)], ['ملاحظات العميل', esc(c.notes)], ['الرقم التسلسلي للجهاز', `<span class="ltr small">${esc(r.serial)}</span>`]])}
+          ['طريقة الدفع المفضلة', esc(c.payMethod)], ['وقت التواصل', esc(c.contactTime)], ['ملاحظات العميل', esc(c.notes)], ['الرقم التسلسلي للجهاز', r.serial ? `<span class="ltr small">${esc(r.serial)}</span>${r.deviceId ? '' : ' <span class="badge b-wa">لم يُربط بجهاز</span>'}` : '']].filter(([, v]) => v && v !== '<span class="ltr"></span>'))}
         <h4 class="mt mb">الباقة</h4>${kv([['الباقة', esc(r.planName)], ['السعر', money(r.price)], ['كود الخصم', esc(r.coupon)], ['الخصم', r.discount ? money(r.discount) : ''], ['الإجمالي', `<b>${money(r.final)}</b>`]])}
         <h4 class="mt mb">السجل</h4>${(r.history || []).map(h => `<div class="small">${fdt(h.time)} — ${esc(h.by)}: ${esc(h.action)}</div>`).join('')}
         <div class="field mt"><label>ملاحظات داخلية</label><textarea class="ta" id="rN" rows="2">${esc(r.notes)}</textarea></div></div>
