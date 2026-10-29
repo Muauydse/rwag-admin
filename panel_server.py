@@ -408,7 +408,11 @@ def device_features(dev: dict) -> dict:
     """مزايا مفعّلة لهذا الجهاز من اللوحة (الافتراضي من الإعدادات العامة)"""
     default = (DB["settings"].get("featuresDefault") or {})
     f = dev.get("features") or {}
-    return {"zatca": bool(f.get("zatca", default.get("zatca", False)))}
+    return {"zatca": bool(f.get("zatca", default.get("zatca", False))),
+            # السماح للعميل بفتح إعدادات الربط مع الهيئة من النظام (وإلا يتم الربط من اللوحة فقط)
+            "zatcaSetup": bool(f.get("zatcaSetup", default.get("zatcaSetup", True))),
+            # أين يذهب «طلب التفعيل» من النظام: اللوحة (رسالة دعم) أو واتساب
+            "zatcaReq": DB["settings"].get("zatcaRequestTo", "panel")}
 
 
 def signup_missing(cu: dict) -> list:
@@ -989,6 +993,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 for k in ("company", "stats", "users", "trial", "mode", "account", "localLicense", "zatca"):
                     if k in b:
                         dev[k] = b[k]
+                rr = (b.get("zatca") or {}).get("remote")
+                if rr and dev.get("zatcaRemote", {}).get("status") == "pending":
+                    dev["zatcaRemote"] = {**dev["zatcaRemote"], "status": "ok" if rr.get("ok") else "error", "error": clean(rr.get("error"), 400), "done": now_iso()}
                 acks = set(b.get("acks") or [])
                 if acks:
                     dev["pushes"] = [x for x in dev.get("pushes", []) if x["id"] not in acks]
@@ -1061,6 +1068,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                      "created": now_iso(), "updated": now_iso(), "unread": True,
                      "messages": [{"id": uid("m"), "from": "client", "name": clean(b.get("userName"), 120), "text": clean(b.get("message"), 8000), "images": imgs, "time": now_iso()}]}
                 DB["tickets"].append(t)
+                if t["category"] == "تفعيل الفوترة الإلكترونية":
+                    dev["zatcaRequest"] = {"time": now_iso(), "ticketId": t["id"]}
                 save()
                 return self.send_json(200, {"ok": True, "ticketId": t["id"]})
             if path == "/api/client/ticket-reply":
@@ -1391,8 +1400,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if "zatca" in b:
                     f["zatca"] = bool(b["zatca"])
                     audit(u, ("تفعيل" if f["zatca"] else "إيقاف") + " الفوترة الإلكترونية لجهاز", d.get("serial") or d["deviceId"])
+                if "zatcaSetup" in b:
+                    f["zatcaSetup"] = bool(b["zatcaSetup"])
+                    audit(u, ("السماح" if f["zatcaSetup"] else "منع") + " فتح إعدادات الربط مع الهيئة لجهاز", d.get("serial") or d["deviceId"])
                 save()
             return self.send_json(200, {"ok": True, "features": device_features(d)})
+        if name == "device/zatca-onboard":
+            # ربط الجهاز بهيئة الزكاة عن بُعد: يُرسل للجهاز وينفّذه عند أول مزامنة (رمز OTP صالح ساعة)
+            need("devices")
+            with lock:
+                d = DB["devices"].get(clean(b.get("deviceId"), 64))
+                if not d:
+                    return self.send_json(404, {"ok": False, "error": "الجهاز غير موجود"})
+                env = clean(b.get("env"), 20)
+                otp = re.sub(r"\D", "", clean(b.get("otp"), 10))
+                if env not in ("sandbox", "simulation", "production"):
+                    raise ValueError("اختر البيئة")
+                if len(otp) != 6:
+                    raise ValueError("رمز OTP من 6 أرقام")
+                types = clean(b.get("types"), 4) if clean(b.get("types"), 4) in ("1100", "0100", "1000") else "1100"
+                d.setdefault("features", {})["zatca"] = True
+                dev_push = {"type": "zatca-onboard", "env": env, "otp": otp, "info": {"types": types, "unit": clean(b.get("unit"), 80) or "الفرع الرئيسي", "industry": clean(b.get("industry"), 80) or "تجزئة"}}
+                d["pushes"] = [x for x in d.get("pushes", []) if x.get("type") != "zatca-onboard"]
+                push(d, dev_push)
+                d["zatcaRemote"] = {"status": "pending", "env": env, "time": now_iso(), "by": u["name"]}
+                audit(u, "طلب ربط جهاز بهيئة الزكاة عن بُعد", f"{d.get('serial') or d['deviceId']} · {env}")
+                save()
+            return self.send_json(200, {"ok": True})
         if name == "device/push-backup":
             need("backups")
             d = DB["devices"].get(clean(b.get("deviceId"), 64))
@@ -2242,7 +2276,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             smtp = dict(DB["settings"].get("smtp", {}))
             smtp["password"] = "••••••••" if smtp.get("password") else ""
             return self.send_json(200, {"ok": True, "email": DB["owner"]["email"], "name": DB["owner"].get("name"), "smtp": smtp,
-                                        "publicUrl": DB["settings"].get("publicUrl"), "keyFingerprint": hashlib.sha256((SIGNING_KEY["x"] + SIGNING_KEY["y"]).encode()).hexdigest()[:16]})
+                                        "publicUrl": DB["settings"].get("publicUrl"), "zatcaRequestTo": DB["settings"].get("zatcaRequestTo", "panel"),
+                                        "featuresDefault": {"zatca": False, "zatcaSetup": True, **(DB["settings"].get("featuresDefault") or {})}, "keyFingerprint": hashlib.sha256((SIGNING_KEY["x"] + SIGNING_KEY["y"]).encode()).hexdigest()[:16]})
         if name == "settings/save":
             need("settings")
             with lock:
@@ -2254,6 +2289,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     smtp["password"] = clean(b["smtp"]["password"], 200)
                 if "publicUrl" in b:
                     DB["settings"]["publicUrl"] = clean(b["publicUrl"], 200)
+                if b.get("zatcaRequestTo") in ("panel", "whatsapp"):
+                    DB["settings"]["zatcaRequestTo"] = b["zatcaRequestTo"]
+                if isinstance(b.get("featuresDefault"), dict):
+                    fd = DB["settings"].setdefault("featuresDefault", {})
+                    for k in ("zatca", "zatcaSetup"):
+                        if k in b["featuresDefault"]:
+                            fd[k] = bool(b["featuresDefault"][k])
                 if b.get("name"):
                     DB["owner"]["name"] = clean(b["name"], 80)
                 audit(u, "تعديل الإعدادات")
