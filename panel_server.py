@@ -77,7 +77,19 @@ DEFAULT_SITE = {"maintenance": {"on": False, "message": "نعمل حالياً �
                 "hero": {"title": "", "subtitle": ""}, "downloadUrl": "",
                 # زر التحميل: file = ملف مرفوع على اللوحة، url = رابط تحدده، contact = تواصل واتساب
                 "download": {"mode": "url", "file": "", "originalName": "", "size": 0, "sha256": "", "uploaded": "", "downloads": 0}, "version": "", "fileSize": "", "whatsapp": "", "email": "",
-                "sections": {"features": True, "showcase": True, "security": True, "plans": True, "download": True, "faq": True, "support": True}}
+                "sections": {"features": True, "showcase": True, "security": True, "plans": True, "download": True, "faq": True, "support": True, "videos": True},
+                # الشروحات والإعلانات (روابط يوتيوب) وحسابات التواصل — تُدار من «الموقع ← الشروحات والتواصل»
+                "videos": [], "social": {}}
+SOCIAL_PLATFORMS = ["youtube", "tiktok", "instagram", "snapchat", "x", "facebook", "linkedin", "telegram"]
+
+
+def youtube_id(url: str) -> str:
+    """معرّف الفيديو من أي صيغة رابط يوتيوب (watch، youtu.be، shorts، embed، live)"""
+    url = (url or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", url):
+        return url
+    m = re.search(r"(?:youtu\.be/|youtube(?:-nocookie)?\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/|live/|v/))([A-Za-z0-9_-]{11})", url)
+    return m.group(1) if m else ""
 # هوية النظام والموقع: الشعار وأرقام الدعم — تتغير من اللوحة وتصل للنظام والموقع فوراً
 DEFAULT_BRANDING = {"ver": 1, "logo": "", "whatsapp": "967735999135", "phoneLabel": "+967 735 999 135", "email": "aspreim@gmail.com", "updated": ""}
 DEFAULT_SYSTEM = {"maintenance": {"on": False, "message": "النظام في وضع الصيانة لتحسين الخدمة — سيعود خلال وقت قصير.", "until": ""},
@@ -271,6 +283,8 @@ def load():
     DB.setdefault("site", json.loads(json.dumps(DEFAULT_SITE)))
     for k, v in DEFAULT_SITE.items():
         DB["site"].setdefault(k, json.loads(json.dumps(v)))
+    for k, v in DEFAULT_SITE["sections"].items():  # أقسام أُضيفت لاحقاً (مثل الشروحات)
+        DB["site"]["sections"].setdefault(k, v)
     DB.setdefault("system", json.loads(json.dumps(DEFAULT_SYSTEM)))
     DB.setdefault("branding", dict(DEFAULT_BRANDING))
     DB.setdefault("visits", [])
@@ -801,7 +815,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.public_json(200, {"ok": True, "maintenance": m if m.get("on") else {"on": False}, "announcement": S["announcement"] if S["announcement"].get("on") else {"on": False},
                                           "hero": S["hero"], "downloadMode": D["mode"], "downloadUrl": dl_url, "version": S.get("version", ""), "fileSize": dl_size,
                                           "whatsapp": S.get("whatsapp") or DB["branding"]["whatsapp"], "email": S.get("email") or DB["branding"]["email"],
-                                          "phoneLabel": DB["branding"]["phoneLabel"], "logo": DB["branding"]["logo"], "sections": S["sections"]})
+                                          "phoneLabel": DB["branding"]["phoneLabel"], "logo": DB["branding"]["logo"], "sections": S["sections"],
+                                          "videos": [{k: v.get(k, "") for k in ("id", "yt", "title", "desc", "kind")} for v in S.get("videos", []) if v.get("show", True)],
+                                          "social": [{"p": k, "url": S.get("social", {}).get(k, {}).get("url", "")} for k in SOCIAL_PLATFORMS
+                                                     if S.get("social", {}).get(k, {}).get("show") and S.get("social", {}).get(k, {}).get("url")]})
         if path == "/api/public/download":
             D = DB["site"]["download"]
             f = os.path.join(SITE_DOWNLOAD, D["file"]) if D["mode"] == "file" and D["file"] else ""
@@ -1680,6 +1697,38 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 audit(u, "تعديل إعدادات الموقع", ("صيانة الموقع مفعّلة" if S["maintenance"]["on"] else ""))
                 save()
             return self.send_json(200, {"ok": True})
+        if name == "site/videos/save":
+            need("site")
+            items = []
+            for v in (b.get("items") or [])[:60]:
+                yt = youtube_id(clean(v.get("url") or v.get("yt"), 300))
+                if not yt:
+                    raise ValueError("رابط يوتيوب غير صحيح: " + clean(v.get("url"), 80))
+                title = clean(v.get("title"), 140).strip()
+                if not title:
+                    raise ValueError("اكتب عنواناً لكل فيديو")
+                items.append({"id": clean(v.get("id"), 40) or uid("vid"), "yt": yt, "url": f"https://youtu.be/{yt}", "title": title,
+                              "desc": clean(v.get("desc"), 600).strip(), "kind": "ad" if v.get("kind") == "ad" else "tutorial",
+                              "show": bool(v.get("show", True)), "created": clean(v.get("created"), 40) or now_iso()})
+            with lock:
+                DB["site"]["videos"] = items
+                audit(u, "تحديث شروحات وإعلانات الموقع", f"{len(items)} فيديو")
+                save()
+            return self.send_json(200, {"ok": True, "items": items})
+        if name == "site/social/save":
+            need("site")
+            out = {}
+            for k in SOCIAL_PLATFORMS:
+                v = (b.get("social") or {}).get(k) or {}
+                url = clean(v.get("url"), 300).strip()
+                if url and not re.match(r"^https?://", url):
+                    raise ValueError("الرابط يجب أن يبدأ بـ https:// — " + k)
+                out[k] = {"url": url, "show": bool(v.get("show")) and bool(url)}
+            with lock:
+                DB["site"]["social"] = out
+                audit(u, "تحديث حسابات التواصل في الموقع", ", ".join(k for k, v in out.items() if v["show"]) or "مخفية")
+                save()
+            return self.send_json(200, {"ok": True, "social": out})
         if name == "site/download-upload":
             need("site")
             orig = os.path.basename(clean(b.get("fileName"), 120)).strip()
