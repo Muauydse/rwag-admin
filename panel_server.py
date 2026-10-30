@@ -23,6 +23,8 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
+import urllib.error
 import zipfile
 from email.message import EmailMessage
 
@@ -652,6 +654,33 @@ def send_mail(to: str, subject: str, body: str) -> bool:
 
 
 # =====================================================================
+#   Firebase — رابط استعادة كلمة المرور عبر البريد (Email Link)
+#   يرسل Firebase رابط تحقق للبريد المسجّل فقط؛ وعند فتحه يتحقق الخادم من الرمز
+#   لدى Firebase نفسه قبل السماح بتعيين كلمة مرور جديدة. مفتاح الويب عام بطبيعته (ليس سراً).
+# =====================================================================
+FIREBASE_API_KEY = os.environ.get("RAWAJ_FIREBASE_API_KEY", "AIzaSyAIwydvbTcfOh2rP3rvQuuvZDeBcBDNNhM")
+FORGOT_HITS = {}
+
+
+def firebase_call(method: str, payload: dict) -> dict:
+    """استدعاء Firebase Auth REST API — يرجع الاستجابة أو {"error": ...}"""
+    if not FIREBASE_API_KEY:
+        return {"error": "disabled"}
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:{method}?key={urllib.parse.quote(FIREBASE_API_KEY)}"
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            return {"error": json.loads(e.read().decode("utf-8")).get("error", {}).get("message", str(e.code))}
+        except Exception:
+            return {"error": str(e.code)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# =====================================================================
 #   أدوات الطلبات
 # =====================================================================
 def clean(s, n=2000) -> str:
@@ -1182,6 +1211,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 st = next((x for x in DB["staff"] if x.get("email", "").lower() == email and email), None)
                 target = st["id"] if st else None
             sent = False
+            hits = [t for t in FORGOT_HITS.get(ip, []) if t > time.time() - 900]
+            if len(hits) >= 5:
+                return self.send_json(429, {"ok": False, "error": "طلبات كثيرة — حاول بعد 15 دقيقة"})
+            FORGOT_HITS[ip] = hits + [time.time()]
+            # الطريقة الأساسية: رابط تحقق من Firebase إلى البريد المسجّل (لا يحتاج إعداد SMTP)
+            if target and FIREBASE_API_KEY:
+                base = (os.environ.get("RAWAJ_PUBLIC_URL") or DB["settings"].get("publicUrl") or "").rstrip("/")
+                if not base or "127.0.0.1" in base or "localhost" in base:
+                    base = f"{self.headers.get('X-Forwarded-Proto', 'http')}://{self.headers.get('Host', f'127.0.0.1:{PORT}')}"
+                r = firebase_call("sendOobCode", {"requestType": "EMAIL_SIGNIN", "email": email, "canHandleCodeInApp": True,
+                                                   "continueUrl": f"{base}/?reset=1&e={urllib.parse.quote(email)}"})
+                if not r.get("error"):
+                    with lock:
+                        DB["resetCodes"][email] = {"fb": True, "exp": time.time() + 900, "uid": target, "tries": 0}
+                        save()
+                    return self.send_json(200, {"ok": True, "via": "firebase", "sent": True})
+                print("Firebase sendOobCode error:", r.get("error"))
+            elif not target:
+                time.sleep(0.4)  # لا نكشف هل البريد مسجّل أم لا
+                return self.send_json(200, {"ok": True, "via": "firebase" if FIREBASE_API_KEY else "code", "sent": True})
             if target:
                 code = f"{secrets.randbelow(10 ** 6):06d}"
                 with lock:
@@ -1198,8 +1247,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             rec = DB["resetCodes"].get(email)
             pw = clean(b.get("password"), 200)
             if not rec or rec["exp"] < time.time() or rec["tries"] >= 5:
-                return self.send_json(400, {"ok": False, "error": "الرمز منتهي — اطلب رمزاً جديداً"})
-            if not hmac.compare_digest(rec["hash"], hashlib.sha256(clean(b.get("code"), 10).strip().encode()).hexdigest()):
+                return self.send_json(400, {"ok": False, "error": "الرابط أو الرمز منتهي — اطلب رابطاً جديداً"})
+            if len(pw) < 10:
+                return self.send_json(400, {"ok": False, "error": "كلمة المرور 10 أحرف على الأقل"})
+            if rec.get("fb"):
+                # التحقق لدى Firebase: الرمز من رابط البريد صالح ويخص نفس البريد (يُستهلك مرة واحدة)
+                r = firebase_call("signInWithEmailLink", {"email": email, "oobCode": clean(b.get("oobCode"), 400).strip()})
+                if r.get("error") or (r.get("email") or "").lower() != email:
+                    rec["tries"] += 1
+                    save()
+                    return self.send_json(400, {"ok": False, "error": "رابط التحقق غير صالح أو مستخدم — اطلب رابطاً جديداً"})
+            elif not hmac.compare_digest(rec["hash"], hashlib.sha256(clean(b.get("code"), 10).strip().encode()).hexdigest()):
                 rec["tries"] += 1
                 save()
                 return self.send_json(400, {"ok": False, "error": "رمز التحقق غير صحيح"})
