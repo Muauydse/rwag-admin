@@ -656,9 +656,21 @@ def send_mail(to: str, subject: str, body: str) -> bool:
 # =====================================================================
 #   Firebase — رابط استعادة كلمة المرور عبر البريد (Email Link)
 #   يرسل Firebase رابط تحقق للبريد المسجّل فقط؛ وعند فتحه يتحقق الخادم من الرمز
-#   لدى Firebase نفسه قبل السماح بتعيين كلمة مرور جديدة. مفتاح الويب عام بطبيعته (ليس سراً).
+#   لدى Firebase نفسه قبل السماح بتعيين كلمة مرور جديدة. المفتاح: RAWAJ_FIREBASE_API_KEY.
 # =====================================================================
-FIREBASE_API_KEY = os.environ.get("RAWAJ_FIREBASE_API_KEY", "AIzaSyAIwydvbTcfOh2rP3rvQuuvZDeBcBDNNhM")
+def _firebase_key() -> str:
+    """مفتاح Firebase من متغير البيئة (الاستضافة) أو من ملف في المجلد الخاص (التشغيل المحلي) — لا يُكتب في الكود"""
+    k = os.environ.get("RAWAJ_FIREBASE_API_KEY", "").strip()
+    if not k:
+        try:
+            with open(os.path.join(PRIVATE, "firebase-api-key.txt"), encoding="utf-8") as f:
+                k = f.read().strip()
+        except OSError:
+            k = ""
+    return k
+
+
+FIREBASE_API_KEY = _firebase_key()
 FORGOT_HITS = {}
 
 

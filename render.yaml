@@ -13,5 +13,7 @@ services:
         sync: false
       - key: MONGODB_URI            # رابط MongoDB Atlas (إجباري على الاستضافة — قرص الاستضافة مؤقت)
         sync: false
+      - key: RAWAJ_FIREBASE_API_KEY # مفتاح Firebase (استعادة كلمة المرور برابط على البريد)
+        sync: false
       - key: MONGODB_DB
         value: rawaj
