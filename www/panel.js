@@ -266,6 +266,37 @@ V.devices = async el => {
   draw();
 };
 
+/* الفوترة الإلكترونية للجهاز: التفعيل، السماح بالإعداد من النظام، والربط بالهيئة عن بُعد */
+const ZENV_AR = { sandbox: 'بيئة المطورين (تجريبية)', simulation: 'المحاكاة', production: 'الإنتاج' };
+function zatcaCardHTML(d) {
+  const f = d.featuresOn || {}, z = d.zatca || {}, rr = d.zatcaRemote, rq = d.zatcaRequest, dis = can('devices') ? '' : 'disabled';
+  const st = z.onboarded ? `<span class="badge b-su">مربوط — ${esc(ZENV_AR[z.env] || '')}</span> <span class="small">مرسلة ${fnum(z.sent || 0)} · بانتظار ${fnum(z.pending || 0)} · مرفوضة ${fnum(z.rejected || 0)} · ICV ${fnum(z.icv || 0)}</span>`
+    : `<span class="badge b-ne">غير مربوط بالهيئة بعد</span>`;
+  const rem = rr ? `<div class="small mt">${rr.status === 'pending' ? '⏳ طلب ربط عن بُعد بانتظار الجهاز' : rr.status === 'ok' ? '✅ تم الربط عن بُعد بنجاح' : '❌ تعذر الربط عن بُعد: ' + esc(rr.error || '')} — ${esc(ZENV_AR[rr.env] || '')} · ${fdt(rr.done || rr.time)}</div>` : '';
+  return `<div class="card mt" style="padding:16px 18px"><h4 class="mb">الفوترة الإلكترونية — هيئة الزكاة (المرحلة الثانية)</h4>
+    ${rq ? `<div class="note t-in mb" style="font-size:13px">📩 طلب العميل تفعيل الخدمة · ${fdt(rq.time)}</div>` : ''}
+    <label class="check" style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="fZatca" ${f.zatca ? 'checked' : ''} ${dis}> <b>تفعيل الفوترة الإلكترونية لهذا الجهاز</b></label>
+    <label class="check mt" style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="fZSetup" ${f.zatcaSetup !== false ? 'checked' : ''} ${dis}> السماح للعميل بفتح إعدادات الربط من النظام</label>
+    <div class="mt">${st}</div>${rem}
+    <div class="fg mt" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+      <div class="field"><label>البيئة</label><select class="in" id="zrEnv">${Object.entries(ZENV_AR).map(([k, v]) => `<option value="${k}" ${k === 'simulation' ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+      <div class="field"><label>رمز OTP من بوابة فاتورة</label><input class="in ltr" id="zrOtp" maxlength="6" placeholder="6 أرقام"></div>
+      <div class="field"><label>أنواع الفواتير</label><select class="in" id="zrTypes"><option value="1100">ضريبية + مبسطة</option><option value="0100">مبسطة فقط</option><option value="1000">ضريبية فقط</option></select></div>
+      <div class="field"><label>اسم الفرع</label><input class="in" id="zrUnit" value="${esc((d.company || {}).city || 'الفرع الرئيسي')}"></div></div>
+    <div class="flex"><button class="btn pr sm" id="zrGo" ${dis}>${ic('send', 'sm')} ربط الجهاز بالهيئة عن بُعد</button><span class="xs muted">يُنفَّذ على جهاز العميل عند أول اتصال (رمز OTP صالح ساعة). تأكد أن بيانات المنشأة والرقم الضريبي والعنوان الوطني مكتملة.</span></div></div>`;
+}
+function bindZatcaCard(el, d, reload) {
+  const save = (body, msg) => api('admin/device/features', { deviceId: d.deviceId, ...body }).then(() => toast(msg)).catch(fail);
+  $('#fZatca', el).onchange = e => save({ zatca: e.target.checked }, e.target.checked ? 'تم تفعيل الفوترة الإلكترونية — تظهر للعميل خلال ثوانٍ' : 'تم إيقاف الفوترة الإلكترونية');
+  $('#fZSetup', el).onchange = e => save({ zatcaSetup: e.target.checked }, e.target.checked ? 'يستطيع العميل فتح إعدادات الربط' : 'إعدادات الربط تُدار من اللوحة فقط');
+  $('#zrEnv', el).onchange = e => { if (e.target.value === 'sandbox') $('#zrOtp', el).value = '123345'; };
+  $('#zrGo', el).onclick = async () => {
+    const env = $('#zrEnv', el).value, otp = $('#zrOtp', el).value.trim();
+    if (!/^\d{6}$/.test(otp)) return toast('أدخل رمز OTP من 6 أرقام', true);
+    if (env === 'production' && !await confirmBox('الربط على بيئة الإنتاج', 'كل فاتورة بعد الربط تُرسل للهيئة كفاتورة حقيقية. متابعة؟')) return;
+    try { await api('admin/device/zatca-onboard', { deviceId: d.deviceId, env, otp, types: $('#zrTypes', el).value, unit: $('#zrUnit', el).value }); toast('تم إرسال طلب الربط — يُنفَّذ على جهاز العميل خلال ثوانٍ إن كان متصلاً'); reload(); } catch (e) { fail(e); }
+  };
+}
 async function deviceModal(id) {
   const { item: d } = await api('admin/device?id=' + id);
   const co = d.company || {}, st = d.stats || {};
@@ -280,9 +311,7 @@ async function deviceModal(id) {
       ['الرقم التسلسلي', `<span class="ltr">${esc(d.serial)}</span>`], ['رقم الاشتراك', `<span class="ltr">${esc(d.subscriptionNo)}</span>`], ['اسم الجهاز', esc(d.computer)], ['مستخدم ويندوز', esc(d.winUser)], ['نظام التشغيل', `<span class="ltr small">${esc(d.os)}</span>`],
       ['إصدار النظام', `<span class="ltr">${esc(d.appVersion)}</span>`], ['عنوان IP', `<span class="ltr">${esc(d.ip)}</span>`], ['أول ظهور', fdt(d.firstSeen)], ['آخر اتصال', fdt(d.lastSeen) + ' · ' + ago(d.lastSeen)], ['آخر نسخة احتياطية', fdt(d.lastBackup)],
       ['الحساب الحالي', esc((d.account || {}).fullName || (d.mode === 'guest' ? 'زائر (تجربة مجانية)' : ''))]])
-      + `<div class="card mt" style="padding:16px 18px"><h4 class="mb">المزايا الإضافية</h4>
-        <label class="check" style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="fZatca" ${d.featuresOn && d.featuresOn.zatca ? 'checked' : ''} ${can('devices') ? '' : 'disabled'}> <b>الفوترة الإلكترونية — الربط مع هيئة الزكاة (المرحلة الثانية)</b></label>
-        <div class="small muted mt">${d.zatca ? (d.zatca.onboarded ? `مربوط بالهيئة — ${esc({ sandbox: 'بيئة المطورين', simulation: 'المحاكاة', production: 'الإنتاج' }[d.zatca.env] || '')} · فواتير مرسلة: ${fnum(d.zatca.sent || 0)} · بانتظار الإرسال: ${fnum(d.zatca.pending || 0)} · مرفوضة: ${fnum(d.zatca.rejected || 0)}` : 'مفعّلة — لم يربط العميل جهازه بالهيئة بعد') : 'يظهر للعميل قسم «الفواتير الإلكترونية» فور التفعيل (خلال ثوانٍ إن كان النظام مفتوحاً).'}</div></div>`
+      + zatcaCardHTML(d)
       + `<div class="field mt"><label>ملاحظات داخلية</label><textarea class="ta" id="dNotes" rows="3">${esc(d.notes)}</textarea></div><button class="btn sec sm" id="dSaveN">${ic('check', 'sm')} حفظ الملاحظات</button>`,
     lic: () => `<div class="grid g2"><div><h4 class="mb">الحالة الحالية</h4>${kv([['الباقة', statusBadge(d.status)], ['بداية الاشتراك', fdate((d.license || {}).start)], ['نهاية الاشتراك', d.license ? (d.license.end ? fdate(d.license.end) : 'دائم') : '—'], ['المتبقي', d.status.remainingDays != null ? Math.ceil(d.status.remainingDays) + ' يوم' : d.license && d.status.active ? 'غير محدود' : '—'],
         ['الفترة التجريبية', d.trial && d.trial.started ? (d.trial.expired ? 'منتهية' : `متبقي ${Math.ceil(d.trial.remaining / 3600)} ساعة`) : 'لم تبدأ']])}
@@ -301,7 +330,7 @@ async function deviceModal(id) {
   };
   const show = k => {
     $$('#dt button', m.el).forEach(b => b.classList.toggle('on', b.dataset.t === k)); $('#dtb', m.el).innerHTML = tabs[k]();
-    if (k === 'info' && $('#fZatca', m.el)) $('#fZatca', m.el).onchange = e => api('admin/device/features', { deviceId: d.deviceId, zatca: e.target.checked }).then(() => toast(e.target.checked ? 'تم تفعيل الفوترة الإلكترونية — تظهر للعميل خلال ثوانٍ' : 'تم إيقاف الفوترة الإلكترونية')).catch(fail);
+    if (k === 'info' && $('#fZatca', m.el)) bindZatcaCard(m.el, d, () => { m.close(); deviceModal(d.deviceId); });
     if (k === 'info') $('#dSaveN', m.el).onclick = () => api('admin/device/update', { deviceId: d.deviceId, notes: $('#dNotes', m.el).value }).then(() => toast('تم الحفظ')).catch(fail);
     if (k === 'lic' && can('licenses')) bindLicenseForm(m.el, { deviceId: d.deviceId, serial: d.serial, onDone: () => { m.close(); deviceModal(id); } });
     if (k === 'tk') bindRows($('#dtb', m.el), d.tickets, t => ticketModal(t.id));
@@ -585,6 +614,12 @@ V.settings = async el => {
       <div class="field"><label>الاسم الظاهر للمالك</label><input class="in" id="oN" value="${esc(s.name || '')}"></div>
       <div class="flex"><button class="btn sec" id="oS">حفظ الاسم</button><a class="btn sec" href="/api/admin/export">${ic('download', 'sm')} تصدير بيانات اللوحة</a></div>
       <div class="xs muted mt">⚠️ احتفظ بنسخة من المجلد <span class="ltr">keys</span> في مكان آمن — بدونه لا يمكن إصدار رموز تفعيل يقبلها النظام.</div></div></div>
+    <div class="card"><div class="card-h"><h3>${ic('shield')} الفوترة الإلكترونية (هيئة الزكاة)</h3></div><div class="card-b">
+      <div class="field"><label>طلبات التفعيل من النظام تصل إلى</label><select class="in" id="zReqTo"><option value="panel" ${s.zatcaRequestTo !== 'whatsapp' ? 'selected' : ''}>لوحة التحكم (رسائل الدعم الفني)</option><option value="whatsapp" ${s.zatcaRequestTo === 'whatsapp' ? 'selected' : ''}>واتساب</option></select></div>
+      <label class="check" style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="zDefOn" ${s.featuresDefault.zatca ? 'checked' : ''}> تفعيل الفوترة الإلكترونية تلقائياً لكل الأجهزة الجديدة</label>
+      <label class="check mt" style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="zDefSetup" ${s.featuresDefault.zatcaSetup !== false ? 'checked' : ''}> السماح افتراضياً للعميل بفتح إعدادات الربط من النظام</label>
+      <div class="xs muted mt">يمكن تخصيص كل جهاز من «الأجهزة ← بيانات الجهاز»، ومنها أيضاً ربط الجهاز بالهيئة عن بُعد.</div>
+      <button class="btn pr mt" id="zSave">حفظ</button></div></div>
     <div class="card" id="mongoCard" style="grid-column:1/-1"></div><div class="card" id="pbCard"></div><div class="card" id="msgCard" style="grid-column:1/-1"></div>` : ''}</div>`;
   $('#pG').onclick = () => { const a = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%'; const v = Array.from(crypto.getRandomValues(new Uint32Array(22)), x => a[x % a.length]).join(''); $('#p1').type = $('#p2').type = 'text'; $('#p1').value = $('#p2').value = v; copy(v); };
   $('#pS').onclick = async () => { if ($('#p1').value !== $('#p2').value) return toast('كلمتا المرور غير متطابقتين', true); try { await api('admin/account/password', { current: $('#p0').value, password: $('#p1').value }); toast('تم تغيير كلمة المرور'); ['#p0', '#p1', '#p2'].forEach(x => $(x).value = ''); } catch (e) { fail(e); } };
@@ -595,6 +630,7 @@ V.settings = async el => {
   $('#eS').onclick = async () => { try { await api('admin/account/email', { email: $('#e1').value, current: $('#e0').value }); toast('تم تغيير البريد'); ME.email = $('#e1').value; renderShell(); go('settings'); } catch (e) { fail(e); } };
   const smtp = () => ({ smtp: { host: $('#sH').value, port: $('#sP').value, user: $('#sU').value, password: $('#sW').value, from: $('#sU').value } });
   $('#sS').onclick = () => api('admin/settings/save', smtp()).then(() => toast('تم الحفظ')).catch(fail);
+  $('#zSave').onclick = () => api('admin/settings/save', { zatcaRequestTo: $('#zReqTo').value, featuresDefault: { zatca: $('#zDefOn').checked, zatcaSetup: $('#zDefSetup').checked } }).then(() => toast('تم الحفظ — يصل للأجهزة خلال ثوانٍ')).catch(fail);
   $('#sT').onclick = async () => { try { await api('admin/settings/save', smtp()); await api('admin/settings/test-mail', {}); toast('تم الإرسال — تحقق من بريدك'); } catch (e) { fail(e); } };
   $('#oS').onclick = () => api('admin/settings/save', { name: $('#oN').value }).then(() => { ME.name = $('#oN').value; renderShell(); go('settings'); toast('تم الحفظ'); }).catch(fail);
 };
@@ -969,12 +1005,58 @@ let SITE_TAB = 'stats', SITE_DAYS = 30, VISIT_F = '';
 const fdur = s => s >= 3600 ? `${Math.floor(s / 3600)} س ${Math.floor(s % 3600 / 60)} د` : s >= 60 ? `${Math.floor(s / 60)} د ${s % 60} ث` : `${s} ث`;
 const EV_LBL = { download: 'تحميل النظام', open_signup: 'فتح نموذج الاشتراك', signup_sent: 'أرسل طلب اشتراك', contact_sent: 'أرسل رسالة', whatsapp: 'ضغط واتساب', plan: 'اختار باقة', coupon: 'جرّب كود خصم' };
 const SEC_LBL = { features: 'المزايا', showcase: 'استعراض النظام', security: 'الأمان', plans: 'الباقات', download: 'التحميل', faq: 'الأسئلة', support: 'خدمة العملاء' };
+/* ---------- الموقع: الشروحات والإعلانات (يوتيوب) + حسابات التواصل ---------- */
+const SOCIAL = { youtube: 'يوتيوب', tiktok: 'تيك توك', instagram: 'إنستقرام', snapchat: 'سناب شات', x: 'إكس (تويتر)', facebook: 'فيسبوك', linkedin: 'لينكدإن', telegram: 'تيليجرام' };
+const ytId = u => { u = String(u || '').trim(); if (/^[\w-]{11}$/.test(u)) return u; const m = u.match(/(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/|v\/))([\w-]{11})/); return m ? m[1] : ''; };
+async function siteMedia(box) {
+  const { config: C } = await api('admin/site?days=1');
+  let V = (C.videos || []).map(v => ({ ...v })); const S = C.social || {};
+  const save = async () => { try { const r = await api('admin/site/videos/save', { items: V }); V = r.items; draw(); toast('تم الحفظ — يظهر في الموقع فوراً'); } catch (e) { fail(e); } };
+  box.innerHTML = `<div class="grid" style="grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:16px;align-items:start">
+    <div class="card"><div class="card-h"><h3>${ic('eye')} الشروحات والإعلانات</h3><span class="f1"></span><span class="xs muted">روابط يوتيوب تظهر في قسم «الشروحات» بالموقع بمشغّل احترافي</span></div><div class="card-b">
+      <div class="fg" style="grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) 150px"><div class="field"><label>رابط يوتيوب</label><input class="in ltr" id="vU" placeholder="https://youtu.be/…"></div>
+        <div class="field"><label>العنوان</label><input class="in" id="vT" placeholder="مثال: إصدار فاتورة ضريبية"></div>
+        <div class="field"><label>النوع</label><select class="in" id="vK"><option value="tutorial">شرح</option><option value="ad">إعلان</option></select></div></div>
+      <div class="field"><label>وصف مختصر (اختياري)</label><input class="in" id="vD" maxlength="600"></div>
+      <div class="flex"><div id="vPrev" class="vprev"></div><button class="btn pr" id="vAdd">${ic('plus', 'sm')} إضافة للموقع</button></div>
+      <div id="vList" class="mt"></div></div></div>
+    <div class="card"><div class="card-h"><h3>${ic('send')} حسابات التواصل الاجتماعي</h3></div><div class="card-b">
+      ${Object.entries(SOCIAL).map(([k, n]) => `<div class="soc-row"><label class="check" style="display:flex;gap:8px;align-items:center;min-width:140px"><input type="checkbox" data-ss="${k}" ${S[k] && S[k].show ? 'checked' : ''}> <b>${n}</b></label>
+        <input class="in ltr" data-su="${k}" value="${esc((S[k] || {}).url || '')}" placeholder="https://"></div>`).join('')}
+      <div class="xs muted mt">المعلَّم فقط يظهر في الموقع (أسفل الصفحة وقسم خدمة العملاء). اترك الرابط فارغاً لإخفاء المنصة.</div>
+      <button class="btn pr mt" id="sSoc">حفظ الحسابات</button></div></div></div>`;
+  const prev = () => { const id = ytId($('#vU').value); $('#vPrev').innerHTML = id ? `<img src="https://i.ytimg.com/vi/${id}/mqdefault.jpg" alt="">` : ''; };
+  $('#vU').oninput = prev;
+  $('#vAdd').onclick = () => {
+    const id = ytId($('#vU').value); if (!id) return toast('رابط يوتيوب غير صحيح', true);
+    if (!$('#vT').value.trim()) return toast('اكتب عنوان الفيديو', true);
+    V.unshift({ url: $('#vU').value.trim(), yt: id, title: $('#vT').value.trim(), desc: $('#vD').value.trim(), kind: $('#vK').value, show: true });
+    ['#vU', '#vT', '#vD'].forEach(x => { $(x).value = ''; }); prev(); save();
+  };
+  const draw = () => {
+    $('#vList').innerHTML = V.length ? V.map((v, i) => `<div class="vrow ${v.show ? '' : 'off'}"><img src="https://i.ytimg.com/vi/${v.yt}/mqdefault.jpg" alt="">
+      <div class="f1"><b>${esc(v.title)}</b> <span class="badge ${v.kind === 'ad' ? 'b-wa' : 'b-pr'}">${v.kind === 'ad' ? 'إعلان' : 'شرح'}</span><div class="xs muted">${esc(v.desc || '')}</div><a class="xs ltr" href="https://youtu.be/${v.yt}" target="_blank">youtu.be/${v.yt}</a></div>
+      <div class="flex"><button class="ib" data-up="${i}" title="أعلى" ${i ? '' : 'disabled'}>▲</button><button class="ib" data-dn="${i}" title="أسفل" ${i < V.length - 1 ? '' : 'disabled'}>▼</button>
+      <button class="btn sec sm" data-sh="${i}">${v.show ? 'إخفاء' : 'إظهار'}</button><button class="btn dg sm" data-rm="${i}">${ic('trash', 'sm')}</button></div></div>`).join('')
+      : '<div class="muted small" style="padding:18px;text-align:center">لا توجد فيديوهات بعد — أضف أول رابط يوتيوب</div>';
+    $$('[data-up]', box).forEach(b => b.onclick = () => { const i = +b.dataset.up; [V[i - 1], V[i]] = [V[i], V[i - 1]]; save(); });
+    $$('[data-dn]', box).forEach(b => b.onclick = () => { const i = +b.dataset.dn; [V[i + 1], V[i]] = [V[i], V[i + 1]]; save(); });
+    $$('[data-sh]', box).forEach(b => b.onclick = () => { V[+b.dataset.sh].show = !V[+b.dataset.sh].show; save(); });
+    $$('[data-rm]', box).forEach(b => b.onclick = async () => { if (await confirmBox('حذف الفيديو', 'سيُحذف من الموقع.', true)) { V.splice(+b.dataset.rm, 1); save(); } });
+  };
+  draw();
+  $('#sSoc').onclick = async () => {
+    const social = {}; Object.keys(SOCIAL).forEach(k => { social[k] = { url: $(`[data-su="${k}"]`, box).value.trim(), show: $(`[data-ss="${k}"]`, box).checked }; });
+    try { await api('admin/site/social/save', { social }); toast('تم حفظ حسابات التواصل'); } catch (e) { fail(e); }
+  };
+}
 V.site = async el => {
-  el.innerHTML = `<div class="card"><div class="tabs" id="stT">${[['stats', 'الإحصائيات'], ['visits', 'الزوار بالتفصيل'], ['settings', 'إعدادات الموقع']].map(([k, l]) => `<button data-t="${k}" class="${SITE_TAB === k ? 'on' : ''}">${l}</button>`).join('')}
+  el.innerHTML = `<div class="card"><div class="tabs" id="stT">${[['stats', 'الإحصائيات'], ['visits', 'الزوار بالتفصيل'], ['media', 'الشروحات والتواصل'], ['settings', 'إعدادات الموقع']].map(([k, l]) => `<button data-t="${k}" class="${SITE_TAB === k ? 'on' : ''}">${l}</button>`).join('')}
     <span class="f1"></span><div class="chips" style="align-self:center">${[[1, 'اليوم'], [7, '7 أيام'], [30, '30 يوماً'], [90, '90 يوماً']].map(([d, l]) => `<button class="chip ${SITE_DAYS === d ? 'on' : ''}" data-d="${d}">${l}</button>`).join('')}</div></div><div id="stB" class="card-b"></div></div>`;
   $$('#stT [data-t]').forEach(b => b.onclick = () => { SITE_TAB = b.dataset.t; go('site'); });
   $$('#stT [data-d]').forEach(b => b.onclick = () => { SITE_DAYS = +b.dataset.d; go('site'); });
   const box = $('#stB');
+  if (SITE_TAB === 'media') return siteMedia(box);
   if (SITE_TAB === 'stats') {
     const { stats: S } = await api('admin/site?days=' + SITE_DAYS);
     const k = (t, v, s, i, tone) => `<div class="card kpi"><div class="k">${t}<span class="ki ${tone}">${ic(i)}</span></div><div class="v num">${v}</div><div class="s">${s}</div></div>`;
