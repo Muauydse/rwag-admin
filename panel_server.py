@@ -210,8 +210,8 @@ def load():
     for d in (UPLOADS, BACKUPS, UPDATES):
         os.makedirs(d, exist_ok=True)
     # مفتاح التوقيع: من متغير البيئة على الاستضافة، أو من مجلد keys محلياً (لا يُرفع أبداً إلى GitHub)
-    if os.environ.get("RAWAJ_SIGNING_KEY"):
-        SIGNING_KEY = json.loads(os.environ["RAWAJ_SIGNING_KEY"])
+    if os.environ.get("RAWAJ_SIGNING_KEY", "").strip():  # تجاهل الأسطر والمسافات الزائدة عند لصق القيمة
+        SIGNING_KEY = json.loads(os.environ["RAWAJ_SIGNING_KEY"].strip())
     elif os.path.exists(KEY_FILE):
         with open(KEY_FILE) as f:
             SIGNING_KEY = json.load(f)
@@ -226,7 +226,7 @@ def load():
             SIGNING_KEY = json.load(f)
         print("تحذير: تم إنشاء مفتاح توقيع جديد — يجب تحديث المفتاح العام في rawaj_license.py و license.js")
     global SECRET, MONGO
-    if os.environ.get("RAWAJ_SECRET_KEY"):
+    if os.environ.get("RAWAJ_SECRET_KEY", "").strip():
         SECRET = bytes.fromhex(os.environ["RAWAJ_SECRET_KEY"].strip())
     else:
         if not os.path.exists(SECRET_FILE):
@@ -1250,17 +1250,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             elif not target:
                 time.sleep(0.4)  # لا نكشف هل البريد مسجّل أم لا
                 return self.send_json(200, {"ok": True, "via": "firebase" if FIREBASE_API_KEY else "code", "sent": True})
+            local = False
             if target:
                 code = f"{secrets.randbelow(10 ** 6):06d}"
-                with lock:
-                    DB["resetCodes"][email] = {"hash": hashlib.sha256(code.encode()).hexdigest(), "exp": time.time() + 900, "uid": target, "tries": 0}
-                    save()
                 sent = send_mail(email, "رمز استعادة كلمة المرور — لوحة تحكم رواج",
                                  f"رمز التحقق الخاص بك: {code}\nصالح لمدة 15 دقيقة.\nإذا لم تطلب هذا الرمز فتجاهل الرسالة.")
-                if not sent:  # البريد غير مُعد بعد: يُكتب الرمز في ملف محلي لا يصل إليه إلا صاحب الجهاز
+                # بدون بريد: على جهازك فقط يُكتب الرمز في ملف خاص؛ على الاستضافة لا يُنشأ رمز لا يمكن الوصول إليه
+                local = not sent and not HOSTED
+                if sent or local:
+                    with lock:
+                        DB["resetCodes"][email] = {"hash": hashlib.sha256(code.encode()).hexdigest(), "exp": time.time() + 900, "uid": target, "tries": 0}
+                        save()
+                if local:
                     with open(os.path.join(DATA, "reset-code.txt"), "w", encoding="utf-8") as f:
                         f.write(f"{email}\n{code}\nصالح حتى {datetime.datetime.fromtimestamp(time.time() + 900):%H:%M}\n")
-            return self.send_json(200, {"ok": True, "mailConfigured": bool(DB["settings"]["smtp"].get("user")), "sent": sent, "fbError": fb_err if target and FIREBASE_API_KEY else ""})
+            # لا تُرسل للمتصفح أي مسارات أو تفاصيل داخلية — فقط حالة مختصرة
+            reason = "quota" if "QUOTA" in fb_err.upper() or "LIMIT" in fb_err.upper() else ""
+            return self.send_json(200, {"ok": True, "via": "code", "sent": sent, "local": local, "reason": reason})
         if path == "/api/auth/reset":
             email = clean(b.get("email"), 120).strip().lower()
             rec = DB["resetCodes"].get(email)
