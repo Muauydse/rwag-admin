@@ -1222,24 +1222,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 st = next((x for x in DB["staff"] if x.get("email", "").lower() == email and email), None)
                 target = st["id"] if st else None
-            sent = False
+            sent, fb_err = False, ""
             hits = [t for t in FORGOT_HITS.get(ip, []) if t > time.time() - 900]
             if len(hits) >= 5:
                 return self.send_json(429, {"ok": False, "error": "طلبات كثيرة — حاول بعد 15 دقيقة"})
             FORGOT_HITS[ip] = hits + [time.time()]
             # الطريقة الأساسية: رابط تحقق من Firebase إلى البريد المسجّل (لا يحتاج إعداد SMTP)
             if target and FIREBASE_API_KEY:
-                base = (os.environ.get("RAWAJ_PUBLIC_URL") or DB["settings"].get("publicUrl") or "").rstrip("/")
-                if not base or "127.0.0.1" in base or "localhost" in base:
-                    base = f"{self.headers.get('X-Forwarded-Proto', 'http')}://{self.headers.get('Host', f'127.0.0.1:{PORT}')}"
-                r = firebase_call("sendOobCode", {"requestType": "EMAIL_SIGNIN", "email": email, "canHandleCodeInApp": True,
-                                                   "continueUrl": f"{base}/?reset=1&e={urllib.parse.quote(email)}"})
+                # الرابط يعود لنفس عنوان اللوحة المفتوح (Firebase يرفض أي دومين غير مسموح في Authorized domains)
+                host_base = f"{self.headers.get('X-Forwarded-Proto', 'http')}://{self.headers.get('Host', f'127.0.0.1:{PORT}')}"
+                bases = [b_ for b_ in [(os.environ.get("RAWAJ_PUBLIC_URL") or "").rstrip("/"), host_base] if b_]
+                for base in bases:
+                    r = firebase_call("sendOobCode", {"requestType": "EMAIL_SIGNIN", "email": email, "canHandleCodeInApp": True,
+                                                       "continueUrl": f"{base}/?reset=1&e={urllib.parse.quote(email)}"})
+                    if not r.get("error"):
+                        break
                 if not r.get("error"):
                     with lock:
                         DB["resetCodes"][email] = {"fb": True, "exp": time.time() + 900, "uid": target, "tries": 0}
                         save()
                     return self.send_json(200, {"ok": True, "via": "firebase", "sent": True})
-                print("Firebase sendOobCode error:", r.get("error"))
+                fb_err = str(r.get("error"))[:200]
+                print("Firebase sendOobCode error:", fb_err)
+                with lock:
+                    audit({"name": "Firebase"}, "تعذر إرسال رابط الاستعادة", f"{email}: {fb_err}")
+                    save()
             elif not target:
                 time.sleep(0.4)  # لا نكشف هل البريد مسجّل أم لا
                 return self.send_json(200, {"ok": True, "via": "firebase" if FIREBASE_API_KEY else "code", "sent": True})
@@ -1253,7 +1260,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if not sent:  # البريد غير مُعد بعد: يُكتب الرمز في ملف محلي لا يصل إليه إلا صاحب الجهاز
                     with open(os.path.join(DATA, "reset-code.txt"), "w", encoding="utf-8") as f:
                         f.write(f"{email}\n{code}\nصالح حتى {datetime.datetime.fromtimestamp(time.time() + 900):%H:%M}\n")
-            return self.send_json(200, {"ok": True, "mailConfigured": bool(DB["settings"]["smtp"].get("user")), "sent": sent})
+            return self.send_json(200, {"ok": True, "mailConfigured": bool(DB["settings"]["smtp"].get("user")), "sent": sent, "fbError": fb_err if target and FIREBASE_API_KEY else ""})
         if path == "/api/auth/reset":
             email = clean(b.get("email"), 120).strip().lower()
             rec = DB["resetCodes"].get(email)
