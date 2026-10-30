@@ -82,7 +82,7 @@ function fileToDataURL(f) { return new Promise((res, rej) => { const r = new Fil
    الدخول
    ===================================================================== */
 let ME = null, ROUTE = 'overview', CHARTS = [];
-function renderAuth(mode = 'login', email = '') {
+function renderAuth(mode = 'login', email = '', code = '') {
   const app = $('#app');
   const head = `<div class="logo"><div class="logo-mark">ر</div><div><b>لوحة تحكم رواج</b><span>إدارة الأنظمة والمشتركين</span></div></div>`;
   const wrapAuth = () => {
@@ -108,17 +108,42 @@ function renderAuth(mode = 'login', email = '') {
     };
     $('#fg').onclick = e => { e.preventDefault(); renderAuth('forgot', $('#lg').value); };
   } else if (mode === 'forgot') {
-    app.innerHTML = `<div class="auth"><form class="auth-box" id="f">${head}<h1>استعادة كلمة المرور</h1><p>سنرسل رمز تحقق مكوّناً من 6 أرقام إلى بريدك</p>
+    app.innerHTML = `<div class="auth"><form class="auth-box" id="f">${head}<h1>استعادة كلمة المرور</h1><p>سنرسل رابط تحقق آمناً إلى بريدك المسجّل</p>
       <div class="field"><label>البريد الإلكتروني</label><input class="in ltr" id="em" value="${esc(email.includes('@') ? email : '')}" autofocus></div>
-      <button class="btn pr block">${ic('mail', 'sm')} إرسال الرمز</button><div class="mt" style="text-align:center"><a href="#" id="bk">رجوع لتسجيل الدخول</a></div></form></div>`;
+      <button class="btn pr block" id="fgGo">${ic('mail', 'sm')} إرسال رابط الاستعادة</button><div class="mt" style="text-align:center"><a href="#" id="bk">رجوع لتسجيل الدخول</a></div></form></div>`;
     $('#bk').onclick = e => { e.preventDefault(); renderAuth(); };
     $('#f').onsubmit = async e => {
       e.preventDefault(); const em = $('#em').value.trim();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) return toast('اكتب بريداً صحيحاً', 'err');
+      $('#fgGo').disabled = true;
       try {
         const r = await api('auth/forgot', { email: em });
+        if (r.via === 'firebase') return renderAuth('sent', em);
         toast(r.sent ? 'تم إرسال الرمز إلى بريدك' : r.mailConfigured ? 'تعذر إرسال البريد — الرمز محفوظ في ملف reset-code.txt داخل مجلد panel-data' : 'البريد غير مُعد بعد — الرمز محفوظ في الملف panel-data\\reset-code.txt على جهاز الخادم');
         renderAuth('reset', em);
-      } catch (x) { fail(x); }
+      } catch (x) { fail(x); $('#fgGo').disabled = false; }
+    };
+  } else if (mode === 'sent') {
+    app.innerHTML = `<div class="auth"><div class="auth-box">${head}<h1>تحقق من بريدك 📩</h1>
+      <p>إذا كان <b class="ltr">${esc(email)}</b> مسجّلاً في اللوحة فسيصله رابط لتعيين كلمة مرور جديدة خلال دقيقة.</p>
+      <p class="xs muted">الرابط صالح لمدة 15 دقيقة ويُستخدم مرة واحدة. لم يصل؟ افحص مجلد الرسائل غير المرغوب فيها (Spam).</p>
+      <button class="btn block mt" id="again">${ic('mail', 'sm')} إرسال مرة أخرى</button><div class="mt" style="text-align:center"><a href="#" id="bk">رجوع لتسجيل الدخول</a></div></div></div>`;
+    $('#bk').onclick = e => { e.preventDefault(); renderAuth(); };
+    $('#again').onclick = () => renderAuth('forgot', email);
+  } else if (mode === 'link') {
+    app.innerHTML = `<div class="auth"><form class="auth-box" id="f">${head}<h1>تعيين كلمة مرور جديدة</h1><p>تم التحقق من بريدك عبر الرابط — اختر كلمة مرور جديدة</p>
+      <div class="field"><label>البريد الإلكتروني</label><input class="in ltr" id="em" value="${esc(email)}" ${email ? 'readonly' : 'autofocus'}></div>
+      <div class="field"><label>كلمة المرور الجديدة</label><input class="in ltr" id="np" type="password" autocomplete="new-password" ${email ? 'autofocus' : ''}><span class="xs muted">10 أحرف على الأقل</span></div>
+      <div class="field"><label>تأكيد كلمة المرور</label><input class="in ltr" id="np2" type="password" autocomplete="new-password"></div>
+      <button class="btn pr block" id="lkGo">${ic('check', 'sm')} حفظ كلمة المرور</button><div class="mt" style="text-align:center"><a href="#" id="bk">رجوع لتسجيل الدخول</a></div></form></div>`;
+    const clear = () => history.replaceState(null, '', location.pathname);
+    $('#bk').onclick = e => { e.preventDefault(); clear(); renderAuth(); };
+    $('#f').onsubmit = async e => {
+      e.preventDefault();
+      if ($('#np').value !== $('#np2').value) return toast('كلمتا المرور غير متطابقتين', 'err');
+      $('#lkGo').disabled = true;
+      try { await api('auth/reset', { email: $('#em').value.trim().toLowerCase(), oobCode: code, password: $('#np').value }); clear(); toast('تم تغيير كلمة المرور — سجّل الدخول'); renderAuth('login'); }
+      catch (x) { fail(x); $('#lkGo').disabled = false; }
     };
   } else {
     app.innerHTML = `<div class="auth"><form class="auth-box" id="f">${head}<h1>تعيين كلمة مرور جديدة</h1><p>أدخل الرمز المرسل إلى <b class="ltr">${esc(email)}</b></p>
@@ -599,7 +624,7 @@ V.settings = async el => {
       <div class="field"><label>كلمة المرور الجديدة</label><input class="in ltr" type="password" id="p1" autocomplete="new-password"><span class="xs muted">10 أحرف على الأقل</span></div>
       <div class="field"><label>تأكيد كلمة المرور</label><input class="in ltr" type="password" id="p2"></div>
       <div class="flex"><button class="btn pr" id="pS">حفظ</button><button class="btn sec" id="pG">توليد كلمة قوية</button></div>
-      <div class="xs muted mt">نسيت كلمة المرور؟ من شاشة الدخول اضغط «نسيت كلمة المرور» ليصلك رمز على البريد.</div></div></div>
+      <div class="xs muted mt">نسيت كلمة المرور؟ من شاشة الدخول اضغط «نسيت كلمة المرور» ليصلك رابط استعادة آمن على بريدك (عبر Firebase).</div></div></div>
     ${s ? `<div class="card"><div class="card-h"><h3>${ic('mail')} البريد الإلكتروني للمالك</h3></div><div class="card-b">
       <div class="field"><label>البريد الحالي</label><input class="in ltr" value="${esc(s.email)}" disabled></div>
       <div class="field"><label>البريد الجديد</label><input class="in ltr" id="e1"></div><div class="field"><label>كلمة المرور الحالية للتأكيد</label><input class="in ltr" type="password" id="e0"></div>
@@ -639,6 +664,9 @@ V.settings = async el => {
    الإقلاع
    ===================================================================== */
 async function boot() {
+  // فتح رابط الاستعادة القادم من بريد Firebase
+  const q = new URLSearchParams(location.search);
+  if (q.get('oobCode') && q.get('reset')) return renderAuth('link', q.get('e') || '', q.get('oobCode'));
   try { const r = await api('auth/me'); ME = r.user; } catch (e) { ME = null; }
   if (!ME) return renderAuth();
   renderShell();
