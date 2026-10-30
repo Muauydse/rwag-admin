@@ -1019,7 +1019,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if latest:
                     u = latest[0]
                     update = {"id": u["id"], "version": u["version"], "notes": u["notes"], "mandatory": u.get("mandatory", False),
-                              "created": u["created"], "size": u.get("size", 0), "url": f"/api/client/update/{u['id']}"}
+                              "created": u["created"], "size": u.get("size", 0), "sha256": u.get("sha256", ""), "url": f"/api/client/update/{u['id']}"}
                 save()
                 lic = dev.get("license")
                 return self.send_json(200, {"ok": True, "serverTime": now_iso(), "licenseToken": lic["token"] if lic else None,
