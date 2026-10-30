@@ -119,8 +119,10 @@ function renderAuth(mode = 'login', email = '', code = '') {
       try {
         const r = await api('auth/forgot', { email: em });
         if (r.via === 'firebase') return renderAuth('sent', em);
-        toast(r.sent ? 'تم إرسال الرمز إلى بريدك' : r.mailConfigured ? 'تعذر إرسال البريد — الرمز محفوظ في ملف reset-code.txt داخل مجلد panel-data' : 'البريد غير مُعد بعد — الرمز محفوظ في الملف panel-data\\reset-code.txt على جهاز الخادم');
-        renderAuth('reset', em);
+        if (r.sent) { toast('تم إرسال رمز التحقق إلى بريدك'); return renderAuth('reset', em); }
+        if (r.local) { toast('تم إنشاء رمز التحقق على جهاز اللوحة'); return renderAuth('reset', em); }
+        toast(r.reason === 'quota' ? 'تم بلوغ الحد اليومي لرسائل الاستعادة — حاول مرة أخرى غداً' : 'تعذر إرسال رسالة الاستعادة حالياً — حاول بعد قليل أو تواصل مع الدعم الفني', 'err');
+        $('#fgGo').disabled = false;
       } catch (x) { fail(x); $('#fgGo').disabled = false; }
     };
   } else if (mode === 'sent') {
