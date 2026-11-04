@@ -179,3 +179,13 @@ html{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
 .vrow{display:flex;gap:12px;align-items:center;padding:10px;border:1px solid var(--border);border-radius:12px;margin-bottom:8px;background:var(--surface)}
 .vrow img{width:120px;height:68px;object-fit:cover;border-radius:8px;flex:none}.vrow.off{opacity:.5}
 .soc-row{display:flex;gap:10px;align-items:center;margin-bottom:8px}.soc-row .in{flex:1}
+
+/* تعليقات الشروحات */
+.vc-list{display:flex;flex-direction:column;gap:12px;padding:4px 0}
+.vc-item{border:1px solid var(--border);border-radius:12px;padding:14px;background:var(--surface)}
+.vc-head{display:flex;gap:10px;align-items:flex-start}
+.vc-head .avatar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--primary-50);color:var(--primary);font-weight:700;flex:none}
+.vc-text{margin:10px 0 0;line-height:1.8;white-space:pre-wrap}
+.vc-reply{display:flex;gap:8px;margin-top:10px;padding:10px 12px;border-radius:10px;background:var(--primary-50);font-size:13px}
+.vc-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}
+.vc-rbox{margin-top:10px}

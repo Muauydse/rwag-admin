@@ -172,6 +172,7 @@ const NAV = [
   ['sales', 'wallet', 'مبيعات الاشتراكات', 'sales'],
   ['plans', 'tag', 'الباقات وأكواد الخصم', 'sales'],
   ['site', 'globe', 'الموقع والزوار', 'site'],
+  ['comments', 'chat', 'تعليقات الشروحات', 'site'],
   ['maintenance', 'tool', 'الصيانة والإعلانات', 'system'],
   ['branding', 'shield', 'الهوية والدعم', 'system'],
   ['tickets', 'chat', 'الدعم الفني', 'tickets'],
@@ -211,7 +212,7 @@ async function go(r) {
   try { await V[r]($('#view')); } catch (e) { $('#view').innerHTML = `<div class="card"><div class="empty"><b>تعذر تحميل الصفحة</b>${esc(e.message)}</div></div>`; }
 }
 async function refreshBadges() {
-  try { const o = await api('admin/overview'); BADGES = { tickets: o.unreadTickets, errors: o.errors7, requests: o.newRequests }; drawNav(); } catch (e) { }
+  try { const o = await api('admin/overview'); BADGES = { tickets: o.unreadTickets, errors: o.errors7, requests: o.newRequests, comments: o.pendingComments }; drawNav(); } catch (e) { }
 }
 
 /* ---------------- مكوّنات ---------------- */
@@ -240,7 +241,7 @@ const V = {};
 
 V.overview = async el => {
   const o = await api('admin/overview');
-  BADGES = { tickets: o.unreadTickets, errors: o.errors7, requests: o.newRequests }; drawNav();
+  BADGES = { tickets: o.unreadTickets, errors: o.errors7, requests: o.newRequests, comments: o.pendingComments }; drawNav();
   const k = (t, v, s, i, tone) => `<div class="card kpi"><div class="k">${t}<span class="ki ${tone}">${ic(i)}</span></div><div class="v num">${fnum(v)}</div><div class="s">${s}</div></div>`;
   el.innerHTML = `<div class="grid g4">${k('الأجهزة المسجلة', o.devices, `${fnum(o.newDevices30)} جهاز جديد خلال 30 يوماً`, 'devices', 't-pr')}${k('اشتراكات فعّالة', o.active, `${fnum(o.trial)} جهاز في الفترة التجريبية`, 'key', 't-su')}
     ${k('متصل خلال 24 ساعة', o.online24, 'أجهزة أرسلت بيانات اليوم', 'refresh', 't-in')}${k('تذاكر مفتوحة', o.openTickets, `${fnum(o.unreadTickets)} غير مقروءة · ${fnum(o.errors7)} عطل هذا الأسبوع`, 'chat', 't-wa')}</div>
@@ -980,6 +981,48 @@ function renewalModal(r) {
     } catch (e) { fail(e); btn.disabled = false; btn.textContent = 'تأكيد التجديد'; }
   };
 }
+/* =====================================================================
+   تعليقات الشروحات: موافقة / رفض / رد — وإحصاءات المشاهدات والإعجابات
+   ===================================================================== */
+const VC_ST = { pending: ['بانتظار الموافقة', 'b-wa'], approved: ['منشور', 'b-su'], rejected: ['مرفوض', 'b-ne'] };
+let VCF_ = 'pending';
+V.comments = async el => {
+  const { items, videos } = await api('admin/video/comments');
+  const cnt = k => items.filter(c => !k || c.status === k).length;
+  el.innerHTML = `<div class="card mb"><div class="card-h"><h3>${ic('globe')} إحصاءات الشروحات</h3><span class="xs muted">المشاهدات والإعجابات من الموقع والنظام معاً</span></div>
+      <div id="vcStats"></div></div>
+    <div class="card"><div class="tb"><div class="chips" id="vcF">${[['pending', 'بانتظار الموافقة'], ['approved', 'المنشورة'], ['rejected', 'المرفوضة'], ['', 'الكل']].map(([k, l]) => `<button class="chip ${VCF_ === k ? 'on' : ''}" data-k="${k}">${l} <span class="num">(${fnum(cnt(k))})</span></button>`).join('')}</div></div>
+      <div id="vcList" class="vc-list"></div></div>`;
+  $('#vcStats').innerHTML = table([
+    ['الفيديو', v => `<b>${esc(v.title)}</b> ${v.kind === 'ad' ? '<span class="badge b-wa">إعلان</span>' : '<span class="badge b-pr">شرح</span>'}${v.show ? '' : ' <span class="badge b-ne">مخفي</span>'}`],
+    ['المشاهدات', v => `<b class="num">${fnum(v.views)}</b>`], ['الإعجابات', v => `<b class="num">${fnum(v.likes)}</b>`], ['التعليقات المنشورة', v => `<span class="num">${fnum(v.comments)}</span>`]
+  ], videos, { empty: 'لا توجد فيديوهات', emptySub: 'أضف الشروحات من «الموقع والزوار ← الشروحات والتواصل»' });
+  const draw = () => {
+    const rows = items.filter(c => !VCF_ || c.status === VCF_);
+    $('#vcList').innerHTML = rows.length ? rows.map(c => `<div class="vc-item" data-id="${c.id}">
+        <div class="vc-head"><div class="avatar sm">${esc((c.name || '?').trim().charAt(0))}</div><div class="f1"><b>${esc(c.name)}</b> <span class="badge ${(VC_ST[c.status] || [])[1]}">${(VC_ST[c.status] || [c.status])[0]}</span> <span class="badge b-in">${c.source === 'system' ? 'من النظام' : 'من الموقع'}</span>
+          <div class="xs muted">على: ${esc(c.video)} · ${fdt(c.created)} (${ago(c.created)})</div></div></div>
+        <div class="vc-text">${esc(c.text)}</div>
+        ${c.reply ? `<div class="vc-reply">${ic('chat', 'sm')} <div><b>ردّك:</b> ${esc(c.reply.text)}<div class="xs muted">${esc(c.reply.by || '')} · ${fdt(c.reply.time)}</div></div></div>` : ''}
+        <div class="vc-acts">${c.status !== 'approved' ? `<button class="btn pr sm" data-a="approve">${ic('check', 'sm')} موافقة ونشر</button>` : ''}
+          <button class="btn sec sm" data-a="reply">${ic('chat', 'sm')} ${c.reply ? 'تعديل الرد' : 'رد'}</button>
+          ${c.status !== 'rejected' ? `<button class="btn sec sm" data-a="reject">رفض</button>` : ''}<button class="btn dg sm" data-a="delete">حذف</button></div>
+        <div class="vc-rbox" hidden><textarea class="ta" rows="2" placeholder="اكتب ردك — يظهر تحت التعليق في الموقع والنظام">${esc(c.reply ? c.reply.text : '')}</textarea><div class="flex mt"><button class="btn pr sm" data-a="send">إرسال الرد</button><span class="xs muted">الرد على تعليق ينشره تلقائياً</span></div></div></div>`).join('')
+      : `<div class="empty"><b>لا توجد تعليقات هنا</b>تعليقات المشاهدين على الشروحات في الموقع والنظام تظهر هنا للموافقة عليها قبل نشرها</div>`;
+    $$('.vc-item', el).forEach(box => {
+      const id = box.dataset.id, act = (action, text) => api('admin/video/comment', { id, action, text }).then(() => { toast('تم'); go('comments'); refreshBadges(); }).catch(fail);
+      $$('[data-a]', box).forEach(b => b.onclick = () => {
+        const a = b.dataset.a;
+        if (a === 'reply') { const r = $('.vc-rbox', box); r.hidden = !r.hidden; if (!r.hidden) $('textarea', r).focus(); return; }
+        if (a === 'send') return act('reply', $('.vc-rbox textarea', box).value);
+        if (a === 'delete' && !confirm('حذف التعليق نهائياً؟')) return;
+        act(a);
+      });
+    });
+  };
+  $$('#vcF .chip').forEach(c => c.onclick = () => { VCF_ = c.dataset.k; $$('#vcF .chip').forEach(x => x.classList.toggle('on', x === c)); draw(); });
+  draw();
+};
 /* نافذة العقد: تنزيل / عرض / إرسال واتساب */
 function contractResult(accountId, contract, waText, mobile, err) {
   const intl = String(mobile || '').replace(/\D/g, '').replace(/^0/, '966');

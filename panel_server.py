@@ -269,7 +269,7 @@ def load():
                     "غيّر كلمة المرور من الإعدادات أو عبر «نسيت كلمة المرور» (رمز يصل للبريد).\n")
         print(f"تم إنشاء حساب المالك: {OWNER_EMAIL} / {pw}")
     for k, v in {"staff": [], "devices": {}, "tickets": [], "errors": [], "notifications": [], "updates": [], "events": [], "audit": [], "resetCodes": {}, "manualLicenses": [],
-                 "accounts": [], "sales": [], "prices": dict(DEFAULT_PRICES), "coupons": [], "requests": []}.items():
+                 "accounts": [], "sales": [], "prices": dict(DEFAULT_PRICES), "coupons": [], "requests": [], "videoStats": {}, "videoComments": []}.items():
         DB.setdefault(k, v)
     if "plans" not in DB:
         P = DB["prices"]
@@ -396,6 +396,78 @@ def create_renewal(acc: dict, plan: dict, method: str, notes: str, source: str, 
         r["status"] = "new"
     r["history"].append({"time": now_iso(), "by": "العميل", "action": f"{action} — {plan['name']} ({method or 'بدون طريقة دفع'})"})
     return r
+
+
+# =====================================================================
+#   تفاعل الشروحات: المشاهدات والإعجابات والتعليقات (تظهر التعليقات بعد موافقة المالك)
+# =====================================================================
+VIEW_SEEN = {}      # (الفيديو، المشاهد) ← آخر مشاهدة محسوبة — مشاهدة واحدة لكل مشاهد كل 6 ساعات
+COMMENT_HITS = {}   # حد التعليقات لكل مشاهد/IP
+
+
+def video_stats(vid: str) -> dict:
+    st = DB["videoStats"].setdefault(vid, {"views": 0, "likers": []})
+    st.setdefault("views", 0)
+    st.setdefault("likers", [])
+    return st
+
+
+def video_counts(vid: str) -> dict:
+    st = DB["videoStats"].get(vid) or {}
+    return {"views": int(st.get("views", 0)), "likes": len(st.get("likers", [])),
+            "comments": sum(1 for c in DB["videoComments"] if c["vid"] == vid and c["status"] == "approved")}
+
+
+def videos_public() -> list:
+    return [{**{k: v.get(k, "") for k in ("id", "yt", "title", "desc", "kind")}, **video_counts(v["id"])}
+            for v in DB["site"].get("videos", []) if v.get("show", True) and v.get("yt")]
+
+
+def video_engage(b: dict, viewer: str, ip: str, source: str) -> dict:
+    """view | like | comments | comment — viewer: معرّف ثابت للمشاهد (زائر الموقع أو جهاز النظام)"""
+    vid = clean(b.get("vid"), 40)
+    v = next((x for x in DB["site"].get("videos", []) if x["id"] == vid and x.get("show", True)), None)
+    if not v:
+        return {"ok": False, "error": "الفيديو غير موجود"}
+    if not re.fullmatch(r"[A-Za-z0-9:_-]{8,80}", viewer or ""):
+        return {"ok": False, "error": "طلب غير صالح"}
+    act = b.get("action")
+    st = video_stats(vid)
+    if act == "view":
+        key = (vid, viewer)
+        if time.time() - VIEW_SEEN.get(key, 0) > 6 * 3600:
+            VIEW_SEEN[key] = time.time()
+            st["views"] = int(st["views"]) + 1
+            if len(VIEW_SEEN) > 50000:
+                VIEW_SEEN.clear()
+            save()
+    elif act == "like":
+        if viewer in st["likers"]:
+            st["likers"].remove(viewer)
+        else:
+            st["likers"].append(viewer)
+            del st["likers"][:-20000]
+        save()
+    elif act == "comment":
+        name, text = clean(b.get("name"), 60).strip(), clean(b.get("text"), 1000).strip()
+        if len(name) < 2 or len(text) < 2:
+            return {"ok": False, "error": "اكتب اسمك وتعليقك"}
+        hits = [t for t in COMMENT_HITS.get(viewer, []) + COMMENT_HITS.get(ip, []) if t > time.time() - 3600]
+        if len(hits) >= 6:
+            return {"ok": False, "error": "أرسلت تعليقات كثيرة — حاول بعد ساعة"}
+        COMMENT_HITS[viewer] = COMMENT_HITS.get(viewer, [])[-10:] + [time.time()]
+        COMMENT_HITS[ip] = COMMENT_HITS.get(ip, [])[-10:] + [time.time()]
+        DB["videoComments"].append({"id": uid("vc"), "vid": vid, "name": name, "text": text, "viewer": viewer, "ip": ip, "source": source,
+                                    "created": now_iso(), "status": "pending", "reply": None})
+        del DB["videoComments"][:-5000]
+        save()
+        return {"ok": True, "pending": True, **video_counts(vid)}
+    elif act != "comments":
+        return {"ok": False, "error": "طلب غير صالح"}
+    items = sorted((c for c in DB["videoComments"] if c["vid"] == vid and c["status"] == "approved"), key=lambda c: c["created"], reverse=True)[:100]
+    return {"ok": True, "liked": viewer in st["likers"], **video_counts(vid),
+            "list": [{"id": c["id"], "name": c["name"], "text": c["text"], "created": c["created"],
+                          "reply": {"text": c["reply"]["text"], "time": c["reply"]["time"]} if c.get("reply") else None} for c in items]}
 
 
 def renewal_input(b: dict):
@@ -912,7 +984,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                           "hero": S["hero"], "downloadMode": D["mode"], "downloadUrl": dl_url, "version": S.get("version", ""), "fileSize": dl_size,
                                           "whatsapp": S.get("whatsapp") or DB["branding"]["whatsapp"], "email": S.get("email") or DB["branding"]["email"],
                                           "phoneLabel": DB["branding"]["phoneLabel"], "logo": DB["branding"]["logo"], "sections": S["sections"],
-                                          "videos": [{k: v.get(k, "") for k in ("id", "yt", "title", "desc", "kind")} for v in S.get("videos", []) if v.get("show", True)],
+                                          "videos": videos_public(),
                                           "social": [{"p": k, "url": S.get("social", {}).get(k, {}).get("url", "")} for k in SOCIAL_PLATFORMS
                                                      if S.get("social", {}).get(k, {}).get("show") and S.get("social", {}).get(k, {}).get("url")]})
         if path == "/api/public/download":
@@ -976,6 +1048,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 DB["requests"].append(req)
                 save()
                 return self.public_json(200, {"ok": True, "requestId": req["id"]})
+            if path == "/api/public/video":
+                return self.public_json(200, video_engage(b, clean(b.get("viewer"), 80), ip, "website"))
             if path == "/api/public/renew":
                 # تجديد من الموقع: يُقبل فقط لحساب موجود (برقمه التسلسلي أو جواله) — بدون كشف أي بيانات عنه
                 if renew_limited(ip):
@@ -1102,6 +1176,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 DB["requests"].append(req)
                 save()
                 return self.send_json(200, {"ok": True, "requestId": req["id"]})
+            if path == "/api/client/videos":
+                # الشروحات والإعلانات نفسها التي تظهر في الموقع — لتبويب «الشروحات» في خدمة العملاء داخل النظام
+                S = DB["site"]
+                save()
+                return self.send_json(200, {"ok": True, "on": (S.get("sections") or {}).get("videos", True) is not False, "videos": videos_public()})
+            if path == "/api/client/video":
+                return self.send_json(200, video_engage(b, "dev:" + did, self.ip(), "system"))
             if path == "/api/client/renew":
                 # تجديد من داخل النظام: الجهاز نفسه يُعرّف الحساب (لا يكتب العميل شيئاً)
                 acc = account_for_renewal(device_id=did)
@@ -1445,6 +1526,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             month = now.strftime("%Y-%m")
             return self.send_json(200, {"ok": True,
                 "newRequests": sum(1 for r in DB["requests"] if r["status"] == "new"),
+                "pendingComments": sum(1 for c in DB["videoComments"] if c["status"] == "pending"),
                 "siteLive": an.stats(DB, 1, DB["requests"])["live"], "siteToday": an.stats(DB, 1, DB["requests"])["visitors"],
                 "maintenance": {"system": DB["system"]["maintenance"].get("on"), "site": DB["site"]["maintenance"].get("on")}, "accounts": len(DB["accounts"]), "revenueMonth": round(sum(x["amount"] for x in DB["sales"] if x["time"][:7] == month), 2),
                 "revenueTotal": round(sum(x["amount"] for x in DB["sales"]), 2), "unpaid": round(sum(x["amount"] for x in DB["sales"] if not x.get("paid", True)), 2),
@@ -1868,6 +1950,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if b.get("downloadMode") in ("file", "url", "contact"):
                     S["download"]["mode"] = b["downloadMode"]
                 audit(u, "تعديل إعدادات الموقع", ("صيانة الموقع مفعّلة" if S["maintenance"]["on"] else ""))
+                save()
+            return self.send_json(200, {"ok": True})
+        if name == "video/comments":
+            need("site")
+            titles = {v["id"]: v["title"] for v in DB["site"].get("videos", [])}
+            items = [dict({k: c.get(k) for k in ("id", "vid", "name", "text", "source", "created", "status", "reply")}, video=titles.get(c["vid"], "فيديو محذوف"))
+                     for c in sorted(DB["videoComments"], key=lambda c: c["created"], reverse=True)]
+            stats = [{"id": v["id"], "title": v["title"], "kind": v.get("kind"), "show": v.get("show", True), **video_counts(v["id"])} for v in DB["site"].get("videos", [])]
+            return self.send_json(200, {"ok": True, "items": items, "videos": stats})
+        if name == "video/comment":
+            need("site")
+            with lock:
+                c = next((x for x in DB["videoComments"] if x["id"] == b.get("id")), None)
+                if not c:
+                    return self.send_json(404, {"ok": False, "error": "التعليق غير موجود"})
+                act = b.get("action")
+                if act == "approve":
+                    c["status"] = "approved"
+                elif act == "reject":
+                    c["status"] = "rejected"
+                elif act == "delete":
+                    DB["videoComments"].remove(c)
+                elif act == "reply":
+                    text = clean(b.get("text"), 1000).strip()
+                    c["reply"] = {"text": text, "by": u["name"], "time": now_iso()} if text else None
+                    if text and c["status"] == "pending":
+                        c["status"] = "approved"  # الرد على تعليق يعني الموافقة عليه
+                else:
+                    raise ValueError("إجراء غير صحيح")
+                audit(u, {"approve": "موافقة على تعليق", "reject": "رفض تعليق", "delete": "حذف تعليق", "reply": "رد على تعليق"}[act], f"{c['name']}: {c['text'][:60]}")
                 save()
             return self.send_json(200, {"ok": True})
         if name == "site/videos/save":
