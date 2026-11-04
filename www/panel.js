@@ -166,7 +166,7 @@ function renderAuth(mode = 'login', email = '', code = '') {
 const NAV = [
   ['overview', 'home', 'الرئيسية', null],
   ['devices', 'devices', 'الأجهزة والمشتركون', 'devices'],
-  ['requests', 'inbox', 'طلبات فتح الحسابات', 'requests'],
+  ['requests', 'inbox', 'طلبات الاشتراك والتجديد', 'requests'],
   ['accounts', 'user', 'حسابات العملاء', 'accounts'],
   ['licenses', 'key', 'الاشتراكات والتفعيل', 'licenses'],
   ['sales', 'wallet', 'مبيعات الاشتراكات', 'sales'],
@@ -857,20 +857,20 @@ async function panelBackupCard(box) {
    ===================================================================== */
 const REQ_ST = { new: ['جديد', 'b-wa'], contacted: ['تم التواصل', 'b-in'], accepted: ['مقبول', 'b-su'], rejected: ['مرفوض', 'b-ne'] };
 const reqBadge = s => `<span class="badge ${(REQ_ST[s] || [])[1] || 'b-ne'}">${(REQ_ST[s] || [s])[0]}</span>`;
-let RF_ = 'new';
+let RF_ = 'new', REQ_META = { plans: [], payMethods: [] };
 V.requests = async el => {
-  const { items } = await api('admin/requests');
+  const { items, plans, payMethods } = await api('admin/requests'); REQ_META = { plans: plans || [], payMethods: payMethods || [] };
   el.innerHTML = `<div class="card"><div class="tb"><div class="chips" id="rs">${[['new', 'جديدة'], ['contacted', 'تم التواصل'], ['accepted', 'مقبولة'], ['rejected', 'مرفوضة'], ['', 'الكل']].map(([k, l]) => `<button class="chip ${RF_ === k ? 'on' : ''}" data-k="${k}">${l} <span class="num">(${fnum(k ? items.filter(r => r.status === k).length : items.length)})</span></button>`).join('')}</div></div><div id="tbl"></div></div>`;
   const draw = () => {
     const rows = items.filter(r => !RF_ || r.status === RF_);
     $('#tbl').innerHTML = table([
       ['التاريخ', r => `<span class="small">${fdt(r.created)}</span><div class="xs muted">${ago(r.created)}</div>`],
-      ['المنشأة', r => `<b>${esc(r.customer.company)}</b>${r.source === 'website' ? ' <span class="badge b-in">من الموقع</span>' : ''}<div class="xs muted ltr">${esc(r.serial || 'بدون رقم تسلسلي')}</div>`],
+      ['المنشأة', r => `<b>${esc(r.customer.company)}</b>${r.type === 'renewal' ? ' <span class="badge b-vi">تجديد</span>' : ''}${r.source === 'website' ? ' <span class="badge b-in">من الموقع</span>' : ''}<div class="xs muted ltr">${esc(r.serial || 'بدون رقم تسلسلي')}</div>`],
       ['التواصل', r => `<span class="ltr">${esc(r.customer.mobile)}</span><div class="xs muted ltr">${esc(r.customer.email || '')}</div>`],
       ['الباقة', r => `<span class="badge b-pr">${esc(r.planName)}</span>${r.coupon ? ` <span class="badge b-vi">${esc(r.coupon)}</span>` : ''}`],
       ['المبلغ', r => `<b>${money(r.final)}</b>${r.discount ? `<div class="xs muted" style="text-decoration:line-through">${money(r.price)}</div>` : ''}`],
       ['الحالة', r => reqBadge(r.status)], ['', r => `<button class="btn wa sm" data-wa="${r.id}">${ic('wa', 'sm')}</button> <button class="btn sec sm" data-o="${r.id}">فتح</button>`]
-    ], rows, { click: 1, empty: 'لا توجد طلبات', emptySub: 'طلبات «اشترك الآن» من النظام والموقع تظهر هنا: اسم النشاط والجوال والبريد مع الرقم التسلسلي' });
+    ], rows, { click: 1, empty: 'لا توجد طلبات', emptySub: 'طلبات «اشترك الآن» و«تجديد الاشتراك» من النظام والموقع تظهر هنا' });
     bindRows($('#tbl'), rows, r => requestModal(r));
     $$('[data-wa]').forEach(b => b.onclick = () => waComposer(items.find(r => r.id === b.dataset.wa)));
     $$('[data-o]').forEach(b => b.onclick = () => requestModal(items.find(r => r.id === b.dataset.o)));
@@ -895,6 +895,7 @@ async function waComposer(r) {
   $('#waGo', m.el).onclick = () => { window.open(url + '?text=' + encodeURIComponent($('#waT', m.el).value), '_blank'); if (ROUTE === 'requests') go('requests'); };
 }
 function requestModal(r) {
+  if (r.type === 'renewal') return renewalModal(r);
   const c = r.customer;
   const kv = pairs => `<div class="kv">${pairs.filter(p => p[1] && String(p[1]).replace(/<[^>]+>/g, '').trim()).map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}</div>`;
   const m = modal({
@@ -929,6 +930,54 @@ function requestModal(r) {
       const res = await api('admin/request/accept', { id: r.id, password: $('#aPw', m.el).value, maxDevices: $('#aDv', m.el).value, price: $('#aPr', m.el).value, method: $('#aMt', m.el).value, paid: $('#aPd', m.el).checked });
       m.close(); contractResult(res.accountId, res.contract, res.waText, c.mobile, res.contractError); go('requests');
     } catch (e) { fail(e); btn.disabled = false; btn.textContent = 'قبول وإنشاء الحساب والعقد'; }
+  };
+}
+/* طلب تجديد اشتراك: حالة الحساب الحالية + تأكيد التجديد بعد التحقق من الدفع */
+function renewalModal(r) {
+  const c = r.customer, a = r.account, lic = a && a.license, st = a && a.status;
+  const kv = pairs => `<div class="kv">${pairs.filter(p => p[1]).map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}</div>`;
+  const plans = REQ_META.plans.length ? REQ_META.plans : [{ id: r.planId, name: r.planName, price: r.final }];
+  const methods = [...new Set([c.payMethod, ...REQ_META.payMethods].filter(Boolean))];
+  const m = modal({
+    title: `طلب تجديد اشتراك — ${esc(c.company)} ${reqBadge(r.status)}`, size: 'xl',
+    body: `<div class="grid g2"><div>
+        <h4 class="mb">العميل واشتراكه الحالي</h4>${a ? kv([['الحساب', esc(a.name)], ['الجوال', `<span class="ltr">${esc(a.phone)}</span>`], ['البريد', c.email ? `<span class="ltr">${esc(c.email)}</span>` : ''],
+          ['الباقة الحالية', esc(lic ? lic.label : 'بدون اشتراك')], ['ينتهي في', lic ? (lic.end ? fdt(lic.end) : 'اشتراك دائم') : ''],
+          ['المتبقي', st ? (st.remainingDays == null ? '∞' : `<b>${fnum(Math.ceil(st.remainingDays))} يوم</b>`) : ''],
+          ['الرقم التسلسلي', r.serial ? `<span class="ltr small">${esc(r.serial)}</span>` : '']]) : `<div class="note t-wa">${ic('alert')} <div>حساب العميل لم يعد موجوداً.</div></div>`}
+        <h4 class="mt mb">الطلب</h4>${kv([['الباقة المطلوبة', `<span class="badge b-pr">${esc(r.planName)}</span>`], ['المبلغ', `<b>${money(r.final)}</b>`], ['طريقة الدفع', esc(c.payMethod)],
+          ['المصدر', r.source === 'website' ? 'الموقع' : 'داخل النظام'], ['ملاحظات العميل', esc(c.notes)]])}
+        <h4 class="mt mb">السجل</h4>${(r.history || []).map(h => `<div class="small">${fdt(h.time)} — ${esc(h.by)}: ${esc(h.action)}</div>`).join('')}
+        <div class="field mt"><label>ملاحظات داخلية</label><textarea class="ta" id="rN" rows="2">${esc(r.notes)}</textarea></div></div>
+      <div>${r.status === 'accepted' ? `<div class="note t-su">${ic('check')} <div>تم تأكيد التجديد${r.renewedEnd ? ' — صالح حتى ' + fdt(r.renewedEnd) : ''}.</div></div>` : !a ? '' : `<h4 class="mb">تأكيد التجديد</h4>
+        <div class="xs muted mb">تحقق من وصول المبلغ أولاً. المدة الجديدة تُضاف إلى تاريخ الانتهاء الحالي (لا يخسر العميل الأيام المتبقية)، ويتحدث النظام عند العميل تلقائياً خلال ثوانٍ.</div>
+        <div class="fg"><div class="field"><label>الباقة</label><select class="in" id="nPl">${plans.map(p => `<option value="${esc(p.id)}" data-price="${p.price}" ${p.id === r.planId ? 'selected' : ''}>${esc(p.name)} — ${money(p.price)}</option>`).join('')}</select></div>
+        <div class="field"><label>المبلغ المحصّل</label><input class="in num" type="number" id="nPr" value="${r.final}"></div>
+        <div class="field"><label>طريقة الدفع</label><select class="in" id="nMt">${(methods.length ? methods : ['تحويل بنكي']).map(x => `<option ${x === c.payMethod ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></div></div>
+        <label class="check mb"><input type="checkbox" id="nPd" checked> تم التحقق من وصول المبلغ</label>
+        <button class="btn pr block" id="nOk">${ic('check', 'sm')} تأكيد التجديد</button>`}</div></div>`,
+    footer: `<button class="btn wa" id="rWa">${ic('wa', 'sm')} تواصل عبر واتساب</button>${r.status !== 'accepted' ? `<button class="btn sec" id="rCt">تم التواصل</button><button class="btn dg" id="rRj">رفض</button>` : ''}<span class="f1"></span><button class="btn sec" id="rSv">حفظ الملاحظات</button><button class="btn sec" data-x>إغلاق</button>`
+  });
+  const upd = body => api('admin/request/update', { id: r.id, ...body }).then(() => { m.close(); go('requests'); }).catch(fail);
+  $('#rWa', m.el).onclick = () => waComposer(r);
+  $('#rSv', m.el).onclick = () => api('admin/request/update', { id: r.id, notes: $('#rN', m.el).value }).then(() => toast('تم الحفظ')).catch(fail);
+  if ($('#rCt', m.el)) $('#rCt', m.el).onclick = () => upd({ status: 'contacted' });
+  if ($('#rRj', m.el)) $('#rRj', m.el).onclick = async () => { const reason = prompt('سبب الرفض (اختياري):'); if (reason === null) return; upd({ status: 'rejected', reason }); };
+  if ($('#nPl', m.el)) $('#nPl', m.el).onchange = e => { $('#nPr', m.el).value = e.target.selectedOptions[0].dataset.price; };
+  if ($('#nOk', m.el)) $('#nOk', m.el).onclick = async () => {
+    if (!$('#nPd', m.el).checked && !confirm('لم تحدد أن المبلغ وصل — هل تريد التجديد على أنه غير محصّل؟')) return;
+    const btn = $('#nOk', m.el); btn.disabled = true; btn.textContent = 'جارٍ التجديد…';
+    try {
+      const res = await api('admin/request/renew', { id: r.id, planId: $('#nPl', m.el).value, price: $('#nPr', m.el).value, method: $('#nMt', m.el).value, paid: $('#nPd', m.el).checked });
+      m.close(); go('requests');
+      const done = modal({
+        title: 'تم تجديد الاشتراك ✓', size: 'md',
+        body: `<p>صالح حتى <b>${res.license.end ? fdt(res.license.end) : 'اشتراك دائم'}</b>. سيتحدث النظام عند العميل تلقائياً عند اتصاله بالإنترنت.</p><div class="field mt"><label>رسالة التأكيد للعميل</label><textarea class="ta" id="dT" rows="7">${esc(res.waText)}</textarea></div>`,
+        footer: `<button class="btn wa" id="dWa">${ic('wa', 'sm')} إرسال عبر واتساب</button><button class="btn sec" id="dCp">${ic('copy', 'sm')} نسخ</button><span class="f1"></span><button class="btn sec" data-x>إغلاق</button>`
+      });
+      $('#dWa', done.el).onclick = () => window.open(res.waUrl.split('?')[0] + '?text=' + encodeURIComponent($('#dT', done.el).value), '_blank');
+      $('#dCp', done.el).onclick = () => copy($('#dT', done.el).value);
+    } catch (e) { fail(e); btn.disabled = false; btn.textContent = 'تأكيد التجديد'; }
   };
 }
 /* نافذة العقد: تنزيل / عرض / إرسال واتساب */
