@@ -354,6 +354,60 @@ def device_by_serial(serial: str):
 
 
 # =====================================================================
+#   تجديد الاشتراك (من الموقع أو من داخل النظام) — لعميل له حساب فقط
+# =====================================================================
+RENEW_HITS = {}  # محاولات البحث لكل IP — يمنع تجربة أرقام عشوائية لمعرفة المشتركين
+
+
+def renew_limited(ip: str) -> bool:
+    hits = [t for t in RENEW_HITS.get(ip, []) if t > time.time() - 3600]
+    RENEW_HITS[ip] = hits + [time.time()]
+    return len(hits) >= 12
+
+
+def account_for_renewal(ident: str = "", device_id: str = ""):
+    """الحساب من الرقم التسلسلي أو الجوال المسجّل (الموقع)، أو من الجهاز نفسه (النظام)"""
+    if device_id:
+        return next((a for a in DB["accounts"] if device_id in a.get("devices", [])), None)
+    ident = (ident or "").strip()
+    if re.fullmatch(r"RWJ(-[A-Z0-9]{4}){4}", ident.upper()):
+        d = device_by_serial(ident.upper()) or next((x for x in DB["devices"].values() if (x.get("serial") or "").upper() == ident.upper()), None)
+        return next((a for a in DB["accounts"] if d and d["deviceId"] in a.get("devices", [])), None)
+    phone = norm_phone(ident)
+    if re.fullmatch(r"\d{9,15}", phone):
+        return next((a for a in DB["accounts"] if a["phone"] == phone), None)
+    return None
+
+
+def create_renewal(acc: dict, plan: dict, method: str, notes: str, source: str, ip: str, dev=None) -> dict:
+    """طلب تجديد في «الطلبات» — طلب مفتوح واحد لكل حساب (يُحدَّث بدل التكرار)"""
+    r = next((x for x in DB["requests"] if x.get("type") == "renewal" and x.get("accountId") == acc["id"] and x["status"] in ("new", "contacted")), None)
+    action = ("تحديث طلب التجديد" if r else "طلب تجديد الاشتراك") + (" من الموقع" if source == "website" else " من داخل النظام")
+    if not r:
+        r = {"id": uid("req"), "type": "renewal", "created": now_iso(), "status": "new", "coupon": "", "discount": 0, "notes": "", "history": []}
+        DB["requests"].append(r)
+    dev = dev or next((DB["devices"][d] for d in acc.get("devices", []) if d in DB["devices"]), None)
+    r.update(source=source, planId=plan["id"], planName=plan["name"], planType=plan["type"], days=plan.get("days"), price=float(plan["price"]), final=float(plan["price"]),
+             currency=DB["prices"].get("currency", "ر.س"), accountId=acc["id"], ip=ip, updated=now_iso(),
+             customer={"company": acc.get("name", ""), "ownerName": (acc.get("settings") or {}).get("ownerName") or acc.get("name", ""), "mobile": acc["phone"],
+                       "email": acc.get("email", ""), "payMethod": method, "notes": notes},
+             deviceId=dev["deviceId"] if dev else None, serial=dev.get("serial") if dev else "")
+    if r["status"] == "contacted":
+        r["status"] = "new"
+    r["history"].append({"time": now_iso(), "by": "العميل", "action": f"{action} — {plan['name']} ({method or 'بدون طريقة دفع'})"})
+    return r
+
+
+def renewal_input(b: dict):
+    plan = next((x for x in active_plans() if x["id"] == b.get("planId")), None)
+    methods = DB["settings"].get("payMethods", [])
+    method = clean(b.get("payMethod"), 60).strip()
+    if methods and method not in methods:
+        method = ""
+    return plan, method, clean(b.get("notes"), 1000).strip()
+
+
+# =====================================================================
 #   حسابات العملاء، الدفعات للأجهزة، المبيعات
 # =====================================================================
 def seal(text: str) -> str:
@@ -785,7 +839,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}
 
     def ip(self) -> str:
-        return self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[0].strip()
+        # آخر عنوان في X-Forwarded-For يضيفه خادم الاستضافة نفسه (الأول يمكن للعميل تزويره)
+        return self.headers.get("X-Forwarded-For", self.client_address[0]).split(",")[-1].strip()
 
     def session(self):
         m = re.search(r"rp_session=([A-Za-z0-9_-]+)", self.headers.get("Cookie", ""))
@@ -883,7 +938,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.public_json(200, r)
         if path == "/api/public/plans":
             return self.public_json(200, {"ok": True, "plans": [plan_public(x) for x in active_plans()], "currency": DB["prices"].get("currency", "ر.س"),
-                                          "payMethods": DB["settings"].get("payMethods", [])})
+                                          "payMethods": DB["settings"].get("payMethods", []), "bankInfo": DB["settings"].get("bankInfo", "")})
         if method != "POST":
             return self.public_json(405, {"ok": False})
         b = self.body()
@@ -921,6 +976,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 DB["requests"].append(req)
                 save()
                 return self.public_json(200, {"ok": True, "requestId": req["id"]})
+            if path == "/api/public/renew":
+                # تجديد من الموقع: يُقبل فقط لحساب موجود (برقمه التسلسلي أو جواله) — بدون كشف أي بيانات عنه
+                if renew_limited(ip):
+                    return self.public_json(429, {"ok": False, "error": "محاولات كثيرة — حاول بعد ساعة أو تواصل مع الدعم"})
+                acc = account_for_renewal(clean(b.get("id"), 40))
+                if not acc:
+                    return self.public_json(200, {"ok": False, "notFound": True})
+                if b.get("check"):
+                    return self.public_json(200, {"ok": True, "found": True})
+                plan, method, notes = renewal_input(b)
+                if not plan:
+                    return self.public_json(400, {"ok": False, "error": "اختر الباقة"})
+                if DB["settings"].get("payMethods") and not method:
+                    return self.public_json(400, {"ok": False, "error": "اختر طريقة الدفع"})
+                r = create_renewal(acc, plan, method, notes, "website", ip)
+                save()
+                return self.public_json(200, {"ok": True, "requestId": r["id"]})
             if path == "/api/public/contact":
                 if sum(1 for t in DB["tickets"] if t.get("ip") == ip and t["created"][:10] == today) >= 10:
                     return self.public_json(429, {"ok": False, "error": "تم استلام رسائلك — سنرد عليك قريباً"})
@@ -999,7 +1071,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if path == "/api/client/plans":
                 save()
                 return self.send_json(200, {"ok": True, "plans": [plan_public(x) for x in active_plans()], "currency": DB["prices"].get("currency", "ر.س"),
-                                            "payMethods": DB["settings"].get("payMethods", [])})
+                                            "payMethods": DB["settings"].get("payMethods", []), "bankInfo": DB["settings"].get("bankInfo", "")})
             if path == "/api/client/coupon":
                 plan = next((x for x in active_plans() if x["id"] == b.get("planId")), None)
                 if not plan:
@@ -1030,6 +1102,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 DB["requests"].append(req)
                 save()
                 return self.send_json(200, {"ok": True, "requestId": req["id"]})
+            if path == "/api/client/renew":
+                # تجديد من داخل النظام: الجهاز نفسه يُعرّف الحساب (لا يكتب العميل شيئاً)
+                acc = account_for_renewal(device_id=did)
+                if not acc:
+                    save()
+                    return self.send_json(200, {"ok": False, "notFound": True})
+                if b.get("check"):
+                    save()
+                    lic = acc.get("license") or {}
+                    return self.send_json(200, {"ok": True, "found": True, "end": lic.get("end"), "label": lic.get("label", "")})
+                plan, method, notes = renewal_input(b)
+                if not plan:
+                    return self.send_json(400, {"ok": False, "error": "اختر الباقة"})
+                if DB["settings"].get("payMethods") and not method:
+                    return self.send_json(400, {"ok": False, "error": "اختر طريقة الدفع"})
+                r = create_renewal(acc, plan, method, notes, "system", self.ip(), dev)
+                save()
+                return self.send_json(200, {"ok": True, "requestId": r["id"]})
             if path == "/api/client/restore-file":
                 # فقط الجهاز الموجّهة له النسخة يستطيع تنزيلها
                 rid = re.sub(r"[^A-Za-z0-9_]", "", clean(b.get("rid"), 60))
@@ -1957,7 +2047,48 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # ---------------- طلبات فتح الحسابات ----------------
         if name == "requests":
             need("requests")
-            return self.send_json(200, {"ok": True, "items": sorted(DB["requests"], key=lambda r: r["created"], reverse=True), "sections": DB["settings"]["waSections"]})
+            items = []
+            for r in sorted(DB["requests"], key=lambda r: r.get("updated") or r["created"], reverse=True):
+                if r.get("type") == "renewal":  # حالة اشتراك العميل الحالية بجانب طلب التجديد
+                    a = next((x for x in DB["accounts"] if x["id"] == r.get("accountId")), None)
+                    lic = (a or {}).get("license")
+                    r = dict(r, account={"name": a["name"], "phone": a["phone"], "license": lic, "status": license_status(lic)} if a else None)
+                items.append(r)
+            return self.send_json(200, {"ok": True, "items": items, "sections": DB["settings"]["waSections"], "payMethods": DB["settings"].get("payMethods", []),
+                                        "plans": [{"id": x["id"], "name": x["name"], "price": x["price"]} for x in active_plans()]})
+        if name == "request/renew":
+            # تأكيد التجديد بعد التحقق من الدفع: تمديد من تاريخ الانتهاء الحالي + إرسال التفعيل لأجهزة العميل
+            need("requests")
+            need("licenses")
+            with lock:
+                r = next((x for x in DB["requests"] if x["id"] == b.get("id") and x.get("type") == "renewal"), None)
+                if not r:
+                    return self.send_json(404, {"ok": False, "error": "طلب التجديد غير موجود"})
+                if r["status"] == "accepted":
+                    raise ValueError("تم تأكيد هذا التجديد مسبقاً")
+                acc = next((a for a in DB["accounts"] if a["id"] == r.get("accountId")), None)
+                if not acc:
+                    raise ValueError("حساب العميل لم يعد موجوداً")
+                plan = next((x for x in DB["plans"] if x["id"] == (b.get("planId") or r["planId"])), None)
+                if not plan:
+                    raise ValueError("الباقة غير موجودة")
+                price = float(b.get("price") if b.get("price") not in (None, "") else plan["price"])
+                method = clean(b.get("method"), 40) or r["customer"].get("payMethod") or "تحويل بنكي"
+                self.set_account_license(u, acc, {"plan": plan["type"] if plan["type"] in PLANS else "custom", "days": plan.get("days"), "price": price,
+                                                  "method": method, "paid": bool(b.get("paid", True)), "note": "تجديد — " + plan["name"], "extend": True})
+                acc["license"]["label"] = plan["name"]
+                r.update(status="accepted", planId=plan["id"], planName=plan["name"], final=price, renewedEnd=acc["license"].get("end"))
+                r["history"].append({"time": now_iso(), "by": u["name"], "action": f"تأكيد التجديد — {plan['name']} ({fmt_money(price)})"})
+                audit(u, "تجديد اشتراك", f"{acc['name']} — {acc['phone']} — {plan['name']}")
+                save()
+            end = acc["license"].get("end")
+            end_txt = datetime.datetime.fromisoformat(end).strftime("%Y-%m-%d") if end else "اشتراك دائم"
+            text = (f"مرحباً {acc['name']} 👋\nتم تجديد اشتراكك في نظام رواج لإدارة الأعمال بنجاح ✅\n"
+                    f"الباقة: {plan['name']}\nصالح حتى: {end_txt}\n"
+                    "سيتحدث النظام على جهازك تلقائياً خلال ثوانٍ (يحتاج اتصالاً بالإنترنت).\nشكراً لثقتك بنا 🌟")
+            phone = norm_phone(acc["phone"])
+            intl = ("966" + phone[1:]) if phone.startswith("0") else phone
+            return self.send_json(200, {"ok": True, "license": acc["license"], "waText": text, "waUrl": f"https://wa.me/{intl}?text={urllib.parse.quote(text)}"})
         if name == "request/wa":
             need("requests")
             r = next((x for x in DB["requests"] if x["id"] == b.get("id")), None)
@@ -1992,6 +2123,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 r = next((x for x in DB["requests"] if x["id"] == b.get("id")), None)
                 if not r:
                     return self.send_json(404, {"ok": False})
+                if r.get("type") == "renewal":
+                    raise ValueError("هذا طلب تجديد — استخدم «تأكيد التجديد»")
                 cu = r["customer"]
                 phone = norm_phone(cu["mobile"])
                 pw = clean(b.get("password"), 200)
