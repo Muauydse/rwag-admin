@@ -176,7 +176,7 @@ const NAV = [
   ['maintenance', 'tool', 'الصيانة والإعلانات', 'system'],
   ['branding', 'shield', 'الهوية والدعم', 'system'],
   ['tickets', 'chat', 'الدعم الفني', 'tickets'],
-  ['errors', 'bug', 'الأعطال', 'errors'],
+  ['errors', 'bug', 'الأعطال والفحص الشامل', 'errors'],
   ['notifications', 'bell', 'الإشعارات', 'notifications'],
   ['updates', 'upload', 'تحديثات النظام', 'updates'],
   ['backups', 'db', 'النسخ الاحتياطية', 'backups'],
@@ -512,7 +512,7 @@ async function ticketModal(id) {
 }
 
 /* ---------------- الأعطال ---------------- */
-V.errors = async el => {
+async function errorsLog(el) {
   const { items } = await api('admin/errors');
   let showResolved = false;
   el.innerHTML = `<div class="card"><div class="tb"><label class="check"><input type="checkbox" id="rs"> عرض المعالجة</label><span class="f1"></span>
@@ -648,13 +648,14 @@ V.settings = async el => {
       <label class="check mt" style="display:flex;gap:10px;align-items:center"><input type="checkbox" id="zDefSetup" ${s.featuresDefault.zatcaSetup !== false ? 'checked' : ''}> السماح افتراضياً للعميل بفتح إعدادات الربط من النظام</label>
       <div class="xs muted mt">يمكن تخصيص كل جهاز من «الأجهزة ← بيانات الجهاز»، ومنها أيضاً ربط الجهاز بالهيئة عن بُعد.</div>
       <button class="btn pr mt" id="zSave">حفظ</button></div></div>
-    <div class="card" id="mongoCard" style="grid-column:1/-1"></div><div class="card" id="pbCard"></div><div class="card" id="msgCard" style="grid-column:1/-1"></div>` : ''}</div>`;
+    <div class="card" id="mongoCard" style="grid-column:1/-1"></div><div class="card" id="pbCard"></div><div class="card" id="notifyCard" style="grid-column:1/-1"></div><div class="card" id="msgCard" style="grid-column:1/-1"></div>` : ''}</div>`;
   $('#pG').onclick = () => { const a = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%'; const v = Array.from(crypto.getRandomValues(new Uint32Array(22)), x => a[x % a.length]).join(''); $('#p1').type = $('#p2').type = 'text'; $('#p1').value = $('#p2').value = v; copy(v); };
   $('#pS').onclick = async () => { if ($('#p1').value !== $('#p2').value) return toast('كلمتا المرور غير متطابقتين', true); try { await api('admin/account/password', { current: $('#p0').value, password: $('#p1').value }); toast('تم تغيير كلمة المرور'); ['#p0', '#p1', '#p2'].forEach(x => $(x).value = ''); } catch (e) { fail(e); } };
   if (!s) return;
   mongoCard($('#mongoCard')).catch(fail);
   panelBackupCard($('#pbCard')).catch(fail);
   messagesCard($('#msgCard')).catch(fail);
+  notifyCard($('#notifyCard')).catch(fail);
   $('#eS').onclick = async () => { try { await api('admin/account/email', { email: $('#e1').value, current: $('#e0').value }); toast('تم تغيير البريد'); ME.email = $('#e1').value; renderShell(); go('settings'); } catch (e) { fail(e); } };
   const smtp = () => ({ smtp: { host: $('#sH').value, port: $('#sP').value, user: $('#sU').value, password: $('#sW').value, from: $('#sU').value } });
   $('#sS').onclick = () => api('admin/settings/save', smtp()).then(() => toast('تم الحفظ')).catch(fail);
@@ -1023,6 +1024,90 @@ V.comments = async el => {
   $$('#vcF .chip').forEach(c => c.onclick = () => { VCF_ = c.dataset.k; $$('#vcF .chip').forEach(x => x.classList.toggle('on', x === c)); draw(); });
   draw();
 };
+/* =====================================================================
+   الأعطال والفحص الشامل: فحص اللوحة والخدمات + صحة أجهزة العملاء + فحص عن بُعد
+   ===================================================================== */
+let ERR_TAB = 'health';
+V.errors = async el => {
+  el.innerHTML = `<div class="chips mb" id="erTabs">${[['health', 'الفحص الشامل'], ['log', 'سجل الأعطال']].map(([k, l]) => `<button class="chip ${ERR_TAB === k ? 'on' : ''}" data-k="${k}">${l}</button>`).join('')}</div><div id="erBox"></div>`;
+  $$('#erTabs .chip').forEach(c => c.onclick = () => { ERR_TAB = c.dataset.k; V.errors(el); });
+  const box = $('#erBox');
+  if (ERR_TAB === 'log') return errorsLog(box);
+  return healthView(box);
+};
+const HC_ST = { ok: ['سليم', 'b-su', '🟢'], warn: ['تنبيه', 'b-wa', '🟡'], bad: ['مشكلة', 'b-da', '🔴'], info: ['ملاحظة', 'b-in', '🔵'] };
+async function healthView(box, deep) {
+  box.innerHTML = '<div class="card"><div class="empty">جارٍ الفحص…</div></div>';
+  const r = await api('admin/health' + (deep ? '?deep=1' : ''));
+  const P = r.panel, D = r.devices, c = D.counts;
+  const bad = P.filter(x => x.status === 'bad').length, warn = P.filter(x => x.status === 'warn').length;
+  box.innerHTML = `<div class="grid g4 mb">
+      <div class="card kpi"><div class="k">اللوحة والخدمات</div><div class="v">${bad ? `<span class="danger">${bad} مشكلة</span>` : warn ? `<span class="warning">${warn} تنبيه</span>` : '<span class="success">كل شيء سليم</span>'}</div></div>
+      <div class="card kpi"><div class="k">أجهزة بها مشاكل</div><div class="v ${c.bad ? 'danger' : ''}">${fnum(c.bad)}</div></div>
+      <div class="card kpi"><div class="k">أجهزة بها تنبيهات</div><div class="v ${c.warn ? 'warning' : ''}">${fnum(c.warn)}</div></div>
+      <div class="card kpi"><div class="k">أجهزة سليمة</div><div class="v success">${fnum(c.ok + c.info)}</div></div></div>
+    <div class="card mb"><div class="card-h"><h3>${ic('shield')} فحص لوحة التحكم والخدمات</h3><span class="f1"></span><span class="xs muted">${fdt(r.time)}</span>
+      <button class="btn sec sm" id="hcRe">${ic('refresh', 'sm')} إعادة الفحص</button><button class="btn sec sm" id="hcDeep">فحص الروابط الخارجية</button></div>
+      <div class="hc-list">${P.map(x => `<div class="hc-row"><span class="hc-dot">${HC_ST[x.status][2]}</span><div class="f1"><b>${esc(x.title)}</b><div class="small muted">${esc(x.detail)}</div>${x.fix ? `<div class="xs" style="color:var(--primary)">الحل: ${esc(x.fix)}</div>` : ''}</div><span class="badge ${HC_ST[x.status][1]}">${HC_ST[x.status][0]}</span></div>`).join('')}</div></div>
+    <div class="card"><div class="card-h"><h3>${ic('devices')} صحة أجهزة العملاء</h3><span class="xs muted">${D.latest ? 'أحدث نسخة منشورة: ' + esc(D.latest) : ''}</span></div>
+      <div class="tb"><div class="chips" id="hdF">${[['issues', 'بها ملاحظات'], ['', 'الكل']].map(([k, l]) => `<button class="chip ${k === 'issues' ? 'on' : ''}" data-k="${k}">${l}</button>`).join('')}</div></div><div id="hdT"></div></div>`;
+  $('#hcRe', box).onclick = () => healthView(box);
+  $('#hcDeep', box).onclick = () => healthView(box, true);
+  let f = 'issues';
+  const draw = () => {
+    const rows = D.rows.filter(x => !f || x.status !== 'ok');
+    $('#hdT', box).innerHTML = table([
+      ['الحالة', x => `<span class="badge ${HC_ST[x.status][1]}">${HC_ST[x.status][2]} ${HC_ST[x.status][0]}</span>`],
+      ['الجهاز', x => `<b>${esc(x.company || 'بدون اسم')}</b><div class="xs muted ltr">${esc(x.serial)}</div>`],
+      ['الملاحظات', x => x.issues.length ? x.issues.map(t => `<div class="small">• ${esc(t)}</div>`).join('') : '<span class="muted small">لا شيء</span>'],
+      ['النسخة', x => `<span class="ltr small">${esc(x.appVersion || '—')}</span>`], ['آخر اتصال', x => x.lastSeen ? `<span class="small">${ago(x.lastSeen)}</span>` : '—'],
+      ['فحص البيانات', x => x.reportPending ? '<span class="badge b-in">بانتظار اتصال الجهاز</span>' : x.report ? `<button class="btn sec sm" data-rep="${x.deviceId}">${x.report.errors ? `<span class="danger">${x.report.errors} خطأ</span>` : x.report.warnings ? `${x.report.warnings} تنبيه` : 'سليمة ✓'} · ${ago(x.report.time)}</button>` : '<span class="muted small">لم يُفحص</span>'],
+      ['', x => `<button class="btn pr sm" data-chk="${x.deviceId}">${ic('shield', 'sm')} فحص عن بُعد</button>`]
+    ], rows, { empty: f ? 'كل الأجهزة سليمة ✓' : 'لا توجد أجهزة', emptySub: f ? 'لا توجد أجهزة بها مشاكل أو تنبيهات' : '' });
+    $$('[data-chk]', box).forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try { await api('admin/health/device', { deviceId: b.dataset.chk }); toast('تم إرسال طلب الفحص — يُنفَّذ عند اتصال الجهاز التالي (خلال ثوانٍ إن كان النظام مفتوحاً)'); healthView(box); }
+      catch (e) { fail(e); b.disabled = false; }
+    });
+    $$('[data-rep]', box).forEach(b => b.onclick = () => healthReport(b.dataset.rep));
+  };
+  $$('#hdF .chip', box).forEach(x => x.onclick = () => { f = x.dataset.k; $$('#hdF .chip', box).forEach(y => y.classList.toggle('on', y === x)); draw(); });
+  draw();
+}
+async function healthReport(did) {
+  const { report: R } = await api('admin/health/report?device=' + encodeURIComponent(did));
+  if (!R) return toast('لا يوجد تقرير بعد', true);
+  const st = R.stats || {};
+  modal({
+    title: `تقرير فحص البيانات — ${esc(st.company || '')}`, size: 'lg',
+    body: `<div class="kv mb">${[['وقت الفحص', fdt(R.time)], ['نسخة النظام', esc(st.appVersion)], ['الأصناف', fnum(st.products)], ['فواتير المبيعات', fnum(st.sales)], ['المشتريات', fnum(st.purchases)],
+      ['العملاء', fnum(st.customers)], ['المستخدمون', fnum(st.users)], ['حجم البيانات', st.dbSizeKB != null ? fnum(st.dbSizeKB) + ' KB' : ''], ['آخر حفظ', st.lastSave ? fdt(st.lastSave) : '']].filter(x => x[1]).map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}</div>
+      ${R.items.length ? `<div class="hc-list">${R.items.map(i => `<div class="hc-row"><span class="hc-dot">${i.sev === 'error' ? '🔴' : '🟡'}</span><div class="f1 small">${esc(i.t)}</div></div>`).join('')}</div>
+        <div class="xs muted mt">الإصلاح يتم من داخل نظام العميل: «الإعدادات ← البيانات ← فحص الآن ← إصلاح تلقائي».</div>` : '<div class="empty"><b>بيانات العميل سليمة 100% ✓</b>أرصدة المخزون والفواتير والترقيم مطابقة</div>'}`,
+    footer: '<span class="f1"></span><button class="btn sec" data-x>إغلاق</button>'
+  });
+}
+
+/* إعدادات إشعارات البريد */
+async function notifyCard(box) {
+  const r = await api('admin/notify/settings');
+  const prov = { resend: 'Resend', brevo: 'Brevo', smtp: 'Gmail (SMTP)' }[r.provider];
+  box.innerHTML = `<div class="card-h"><h3>${ic('mail')} إشعارات البريد</h3><span class="f1"></span>${prov ? `<span class="badge b-su">المزود: ${prov}</span>` : '<span class="badge b-wa">لا يوجد مزود بريد</span>'}</div><div class="card-b">
+    ${prov ? '' : `<div class="note t-wa">${ic('alert')} <div>أضف <b class="ltr">RESEND_API_KEY</b> في متغيرات الاستضافة (Render ← Environment) ثم أعد النشر.</div></div>`}
+    <div class="field"><label>البريد الذي تصله الإشعارات</label><input class="in ltr" id="nfTo" value="${esc(r.to)}"><span class="xs muted">مع Resend المجاني: نفس البريد الذي سجّلت به في Resend فقط. لأكثر من بريد افصل بفاصلة.</span></div>
+    <div class="grid g2" style="gap:6px">${Object.entries(r.labels).map(([k, l]) => `<label class="check"><input type="checkbox" data-ev="${k}" ${r.events[k] ? 'checked' : ''}> ${esc(l)}</label>`).join('')}</div>
+    <div class="flex mt"><button class="btn pr" id="nfS">حفظ</button><button class="btn sec" id="nfT" ${prov ? '' : 'disabled'}>${ic('mail', 'sm')} رسالة تجريبية</button><span class="f1"></span>
+      <span class="xs muted">${r.state.last ? `آخر إرسال: ${fdt(r.state.last)} — ${r.state.ok ? '<span class="success">نجح</span>' : '<span class="danger">فشل: ' + esc(r.state.error) + '</span>'}` : 'لم يُرسل شيء بعد'}</span></div>
+    <div class="xs muted mt">لا يتكرر الإشعار لنفس المحادثة أكثر من مرة كل 10 دقائق. لا تُرسل كلمات مرور أو بيانات حساسة في الرسائل.</div></div>`;
+  const ev = () => Object.fromEntries($$('[data-ev]', box).map(x => [x.dataset.ev, x.checked]));
+  $('#nfS', box).onclick = () => api('admin/notify/settings', { to: $('#nfTo', box).value, events: ev() }).then(() => { toast('تم الحفظ'); notifyCard(box); }).catch(fail);
+  $('#nfT', box).onclick = async () => {
+    const b = $('#nfT', box); b.disabled = true; b.textContent = 'جارٍ الإرسال…';
+    try { await api('admin/notify/settings', { to: $('#nfTo', box).value, events: ev() }); await api('admin/notify/test', {}); toast('تم الإرسال — افحص بريدك (وانظر في Spam أول مرة)'); }
+    catch (e) { fail(e); }
+    notifyCard(box);
+  };
+}
 /* نافذة العقد: تنزيل / عرض / إرسال واتساب */
 function contractResult(accountId, contract, waText, mobile, err) {
   const intl = String(mobile || '').replace(/\D/g, '').replace(/^0/, '966');

@@ -354,6 +354,250 @@ def device_by_serial(serial: str):
 
 
 # =====================================================================
+#   إشعارات البريد (Resend أو Brevo عبر HTTPS — مجانية) — طلبات الاشتراك والتجديد والدعم
+# =====================================================================
+NOTIFY_KEYS = {"signup": "طلب اشتراك جديد", "renewal": "طلب تجديد اشتراك", "ticket": "رسالة دعم فني جديدة", "reply": "رد عميل على محادثة دعم",
+               "contact": "رسالة من نموذج التواصل في الموقع", "comment": "تعليق جديد على الشروحات", "error": "عطل متكرر في جهاز عميل"}
+NOTIFY_DEFAULT = {"signup": True, "renewal": True, "ticket": True, "reply": True, "contact": True, "comment": False, "error": False}
+NOTIFY_STATE = {"last": None, "ok": None, "error": "", "provider": "", "sent": 0}
+NOTIFY_THROTTLE = {}
+PANEL_BASE = {"url": ""}
+EXPECTED_PUBLIC_X = "Pm510TjpPUeX4jz1dM4MzPgKmjfWh8__BsU48Fa7c80"  # المفتاح العام المدمج في أنظمة العملاء (license.js / rawaj_license.py)
+
+
+def mail_provider() -> str:
+    if os.environ.get("RESEND_API_KEY", "").strip():
+        return "resend"
+    if os.environ.get("BREVO_API_KEY", "").strip():
+        return "brevo"
+    smtp = DB["settings"].get("smtp", {}) if DB else {}
+    return "smtp" if smtp.get("user") and smtp.get("password") else ""
+
+
+def notify_cfg() -> dict:
+    s = DB["settings"]
+    n = s.setdefault("notify", {})
+    n.setdefault("to", DB["owner"]["email"])
+    n.setdefault("events", dict(NOTIFY_DEFAULT))
+    for k, v in NOTIFY_DEFAULT.items():
+        n["events"].setdefault(k, v)
+    return n
+
+
+def http_json(url: str, payload, headers: dict, method: str = "POST", timeout: int = 20):
+    req = urllib.request.Request(url, data=json.dumps(payload).encode() if payload is not None else None, method=method,
+                                 headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "rawaj-panel/1.0", **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8") or "{}"
+            return True, json.loads(body)
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode("utf-8") or "{}")
+            msg = msg.get("message") or msg.get("error") or msg
+        except Exception:
+            msg = ""
+        return False, f"HTTP {e.code} {msg}"[:300]
+    except Exception as e:
+        return False, str(e)[:300]
+
+
+def send_email(to: list, subject: str, html: str, text: str = "") -> tuple:
+    """إرسال فعلي عبر المزود المتاح — يرجع (نجاح، الخطأ)"""
+    prov = mail_provider()
+    NOTIFY_STATE["provider"] = prov
+    if prov == "resend":
+        ok, r = http_json("https://api.resend.com/emails", {"from": os.environ.get("RESEND_FROM", "Rawaj Panel <onboarding@resend.dev>"), "to": to,
+                                                              "subject": subject, "html": html, "text": text or None},
+                          {"Authorization": "Bearer " + os.environ["RESEND_API_KEY"].strip()})
+    elif prov == "brevo":
+        sender = os.environ.get("BREVO_SENDER", "").strip() or DB["owner"]["email"]
+        ok, r = http_json("https://api.brevo.com/v3/smtp/email", {"sender": {"name": "لوحة تحكم رواج", "email": sender}, "to": [{"email": x} for x in to],
+                                                                   "subject": subject, "htmlContent": html, "textContent": text or None},
+                          {"api-key": os.environ["BREVO_API_KEY"].strip()})
+    elif prov == "smtp":
+        ok = all(send_mail(x, subject, text or re.sub(r"<[^>]+>", " ", html)) for x in to)
+        r = "" if ok else "تعذر الإرسال عبر SMTP"
+    else:
+        ok, r = False, "لا يوجد مزود بريد — أضف RESEND_API_KEY أو BREVO_API_KEY في الاستضافة"
+    NOTIFY_STATE.update(last=now_iso(), ok=ok, error="" if ok else str(r))
+    if ok:
+        NOTIFY_STATE["sent"] += 1
+    return ok, ("" if ok else str(r))
+
+
+def mail_html(title: str, rows: list, text: str = "", route: str = "") -> str:
+    esc_ = lambda v: str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    trs = "".join(f'<tr><td style="padding:6px 0;color:#64748b;width:130px;vertical-align:top">{esc_(k)}</td><td style="padding:6px 0;font-weight:600">{esc_(v)}</td></tr>'
+                  for k, v in rows if v not in (None, ""))
+    base = PANEL_BASE["url"] or os.environ.get("RAWAJ_PUBLIC_URL", "")
+    btn = f'<p style="margin:22px 0 0"><a href="{base}/" style="background:#4f46e5;color:#fff;text-decoration:none;padding:11px 22px;border-radius:10px;font-weight:700;display:inline-block">فتح لوحة التحكم ← {esc_(route)}</a></p>' if base else ""
+    return f'''<div dir="rtl" style="font-family:Tahoma,Arial,sans-serif;background:#f1f5f9;padding:24px"><div style="max-width:560px;margin:auto;background:#fff;border-radius:16px;padding:24px;border:1px solid #e2e8f0">
+<div style="font-size:13px;color:#4f46e5;font-weight:700">لوحة تحكم رواج</div><h2 style="margin:6px 0 16px;font-size:20px;color:#0f172a">{esc_(title)}</h2>
+<table style="width:100%;border-collapse:collapse;font-size:14px;color:#0f172a">{trs}</table>
+{f'<div style="margin-top:14px;padding:12px 14px;background:#f8fafc;border-radius:10px;white-space:pre-wrap;line-height:1.8;font-size:14px">{esc_(text)}</div>' if text else ''}
+{btn}<p style="margin:20px 0 0;font-size:11px;color:#94a3b8">إشعار تلقائي — يمكنك إيقافه من «الإعدادات ← إشعارات البريد»</p></div></div>'''
+
+
+def notify(kind: str, title: str, rows: list, text: str = "", route: str = "", throttle_key: str = "", gap: int = 600) -> None:
+    """إشعار بريد في الخلفية (لا يؤخر رد العميل) — مرة كل 10 دقائق لنفس المحادثة"""
+    try:
+        cfg = notify_cfg()
+        if not cfg["events"].get(kind) or not mail_provider():
+            return
+        tk = throttle_key or kind + ":" + title
+        if time.time() - NOTIFY_THROTTLE.get(tk, 0) < gap:
+            return
+        NOTIFY_THROTTLE[tk] = time.time()
+        if len(NOTIFY_THROTTLE) > 5000:
+            NOTIFY_THROTTLE.clear()
+        to = [x.strip() for x in re.split(r"[,;\s]+", cfg.get("to") or "") if "@" in x] or [DB["owner"]["email"]]
+        subject = f"رواج — {NOTIFY_KEYS.get(kind, title)}: {title}"[:180]
+        html = mail_html(title, rows, text, route)
+        plain = title + "\n" + "\n".join(f"{k}: {v}" for k, v in rows if v) + ("\n\n" + text if text else "")
+        threading.Thread(target=send_email, args=(to, subject, html, plain), daemon=True).start()
+    except Exception as e:
+        print("notify error:", e)
+
+
+def mail_keepalive():
+    """مفاتيح Brevo تنتهي بعد 90 يوماً بلا استخدام — استدعاء خفيف أسبوعياً يبقيها فعّالة"""
+    while True:
+        time.sleep(3600)
+        try:
+            if os.environ.get("BREVO_API_KEY", "").strip() and not os.environ.get("RESEND_API_KEY", "").strip():
+                last = DB["settings"].get("brevoPing", "")
+                if not last or (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(last)).days >= 6:
+                    ok, _ = http_json("https://api.brevo.com/v3/account", None, {"api-key": os.environ["BREVO_API_KEY"].strip()}, method="GET")
+                    if ok:
+                        DB["settings"]["brevoPing"] = now_iso()
+                        save()
+        except Exception:
+            pass
+
+
+# =====================================================================
+#   الفحص الشامل: اللوحة والخدمات + صحة أجهزة العملاء
+# =====================================================================
+def _ver_tuple(v: str):
+    return tuple(int(x) for x in re.findall(r"\d+", str(v or ""))[:4]) or (0,)
+
+
+def _ago_days(iso: str):
+    try:
+        t = datetime.datetime.fromisoformat(iso)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        return (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() / 86400
+    except Exception:
+        return None
+
+
+def health_panel(deep: bool = False) -> list:
+    out = []
+    add = lambda id_, title, status, detail, fix="": out.append({"id": id_, "title": title, "status": status, "detail": detail, "fix": fix})
+    # مفتاح التوقيع
+    try:
+        pub = ec.public_jwk(SIGNING_KEY)
+        if not SIGNING_KEY.get("d"):
+            add("signing", "مفتاح توقيع التراخيص", "bad", "المفتاح لا يحتوي الجزء السري — لا يمكن إصدار تراخيص")
+        elif HOSTED and pub.get("x") != EXPECTED_PUBLIC_X:
+            add("signing", "مفتاح توقيع التراخيص", "bad", "المفتاح لا يطابق المفتاح المدمج في أنظمة العملاء — رموز التفعيل ستُرفض", "انسخ RAWAJ_SIGNING_KEY من «أسرار-الاستضافة.txt» إلى الاستضافة")
+        else:
+            add("signing", "مفتاح توقيع التراخيص", "ok", "موجود وسليم" + (" ويطابق أنظمة العملاء" if pub.get("x") == EXPECTED_PUBLIC_X else ""))
+    except Exception as e:
+        add("signing", "مفتاح توقيع التراخيص", "bad", f"خطأ: {e}")
+    add("secret", "مفتاح تشفير كلمات مرور العملاء", "ok" if SECRET and len(SECRET) >= 16 else "bad", "موجود" if SECRET else "غير موجود")
+    # MongoDB
+    st = MONGO.state if MONGO else {}
+    if not st.get("enabled"):
+        add("mongo", "قاعدة البيانات السحابية MongoDB", "bad" if HOSTED else "warn", "غير مفعّلة — البيانات على قرص الاستضافة المؤقت فقط" if HOSTED else "غير مفعّلة (تشغيل محلي)", "أضف MONGODB_URI")
+    elif not st.get("connected"):
+        add("mongo", "قاعدة البيانات السحابية MongoDB", "bad", "غير متصلة: " + (st.get("lastError") or "تعذر الاتصال"))
+    else:
+        last = st.get("lastSync")
+        age = (time.time() - last) / 60 if last else None
+        add("mongo", "قاعدة البيانات السحابية MongoDB", "ok" if age is None or age < 30 else "warn",
+            f"متصلة · آخر مزامنة {'قبل ' + str(int(age)) + ' دقيقة' if age is not None else 'عند التشغيل'} · {st.get('syncs', 0)} مزامنة منذ التشغيل")
+    # البريد
+    prov = mail_provider()
+    if not prov:
+        add("mail", "إشعارات البريد", "warn", "لا يوجد مزود بريد", "أضف RESEND_API_KEY في الاستضافة")
+    elif NOTIFY_STATE["ok"] is False:
+        add("mail", "إشعارات البريد", "bad", f"آخر إرسال فشل ({NOTIFY_STATE['last']}): {NOTIFY_STATE['error']}", "اضغط «رسالة تجريبية» في الإعدادات")
+    else:
+        add("mail", "إشعارات البريد", "ok", f"المزود: {prov.title()} · إلى {notify_cfg().get('to')}" + (f" · آخر إرسال {NOTIFY_STATE['last'][:16].replace('T', ' ')}" if NOTIFY_STATE["last"] else ""))
+    # Firebase
+    add("firebase", "استعادة كلمة المرور (Firebase)", "ok" if FIREBASE_API_KEY else "warn", "مضبوط" if FIREBASE_API_KEY else "غير مضبوط — الاستعادة برمز عبر البريد فقط",
+        "" if FIREBASE_API_KEY else "أضف RAWAJ_FIREBASE_API_KEY")
+    # النسخ الاحتياطي للوحة
+    bk = DB["settings"].get("backup", {})
+    d = _ago_days(bk.get("last") or "")
+    add("backup", "النسخ الاحتياطي للوحة", "ok" if d is not None and d < 2 else "warn", f"آخر نسخة قبل {d:.1f} يوم" if d is not None else "لم تُنشأ نسخة بعد")
+    # تحميل النظام
+    D = DB["site"].get("download", {})
+    if D.get("mode") == "file":
+        okf = bool(D.get("file")) and os.path.exists(os.path.join(UPDATES, D["file"]))
+        add("download", "رابط تحميل النظام في الموقع", "ok" if okf else "bad", "ملف مرفوع في اللوحة" if okf else "الملف المرفوع غير موجود")
+    elif D.get("mode") == "url" and DB["site"].get("downloadUrl"):
+        if deep:
+            ok, r = http_json(DB["site"]["downloadUrl"], None, {}, method="HEAD", timeout=12)
+            add("download", "رابط تحميل النظام في الموقع", "ok" if ok or "HTTP 405" in str(r) else "bad", "الرابط يعمل" if ok else f"الرابط لا يعمل: {r}")
+        else:
+            add("download", "رابط تحميل النظام في الموقع", "ok", "رابط خارجي مضبوط")
+    else:
+        add("download", "رابط تحميل النظام في الموقع", "warn", "لا يوجد رابط تحميل مباشر")
+    # الصيانة
+    if DB["system"]["maintenance"].get("on") or DB["site"]["maintenance"].get("on"):
+        add("maint", "وضع الصيانة", "warn", "مفعّل — العملاء لا يستطيعون استخدام " + " و".join(x for x, on in (("النظام", DB["system"]["maintenance"].get("on")), ("الموقع", DB["site"]["maintenance"].get("on"))) if on))
+    # بانتظارك
+    pend = [(sum(1 for r in DB["requests"] if r["status"] == "new"), "طلبات جديدة"), (sum(1 for t in DB["tickets"] if t.get("unread")), "رسائل دعم غير مقروءة"),
+            (sum(1 for c in DB["videoComments"] if c["status"] == "pending"), "تعليقات بانتظار الموافقة")]
+    waiting = "، ".join(f"{n} {l}" for n, l in pend if n)
+    add("inbox", "بانتظار متابعتك", "warn" if waiting else "ok", waiting or "لا يوجد شيء معلّق")
+    return out
+
+
+def health_devices() -> dict:
+    latest = max((u.get("version", "") for u in DB["updates"]), key=_ver_tuple, default="")
+    rows = []
+    for d in DB["devices"].values():
+        issues = []
+        seen = _ago_days(d.get("lastSeen") or "")
+        lic = d.get("license")
+        acc = next((a for a in DB["accounts"] if d["deviceId"] in a.get("devices", [])), None)
+        lst = license_status(acc.get("license") if acc and acc.get("license") else lic)
+        if seen is not None and seen > 7:
+            issues.append(("warn" if seen < 30 else "info", f"لم يتصل منذ {int(seen)} يوم"))
+        if latest and d.get("appVersion") and _ver_tuple(d["appVersion"]) < _ver_tuple(latest):
+            issues.append(("info", f"نسخة قديمة {d['appVersion']} (الأحدث {latest})"))
+        if lic or acc:
+            if not lst["active"]:
+                issues.append(("bad", "الاشتراك " + lst["label"]))
+            elif lst["remainingDays"] is not None and lst["remainingDays"] <= 7:
+                issues.append(("warn", f"الاشتراك ينتهي خلال {int(lst['remainingDays'])} يوم"))
+        errs = sum(1 for e in DB["errors"] if e["deviceId"] == d["deviceId"] and not e.get("resolved") and (_ago_days(e.get("received") or "") or 99) < 7)
+        if errs:
+            issues.append(("bad" if errs >= 5 else "warn", f"{errs} عطل خلال 7 أيام"))
+        z = d.get("zatca") or {}
+        if z.get("rejected"):
+            issues.append(("bad", f"{z['rejected']} فاتورة إلكترونية مرفوضة"))
+        if (z.get("pending") or 0) > 10:
+            issues.append(("warn", f"{z['pending']} فاتورة إلكترونية لم تُرسل"))
+        rep = d.get("healthReport")
+        if rep and rep.get("errors"):
+            issues.append(("bad", f"فحص البيانات: {rep['errors']} خطأ"))
+        rank = {"bad": 3, "warn": 2, "info": 1}
+        sev = max((rank[s] for s, _ in issues), default=0)
+        rows.append({"deviceId": d["deviceId"], "serial": d.get("serial", ""), "company": (d.get("company") or {}).get("name") or (acc or {}).get("name", ""),
+                     "appVersion": d.get("appVersion", ""), "lastSeen": d.get("lastSeen"), "license": lst["label"], "status": {3: "bad", 2: "warn", 1: "info"}.get(sev, "ok"),
+                     "issues": [t for _, t in sorted(issues, key=lambda x: -rank[x[0]])],
+                     "report": {k: rep.get(k) for k in ("time", "errors", "warnings", "requested")} if rep else None, "reportPending": bool(d.get("healthRequested"))})
+    rows.sort(key=lambda r: ({"bad": 0, "warn": 1, "info": 2, "ok": 3}[r["status"]], r["company"]))
+    return {"latest": latest, "rows": rows, "counts": {k: sum(1 for r in rows if r["status"] == k) for k in ("bad", "warn", "info", "ok")}}
+
+
+# =====================================================================
 #   تجديد الاشتراك (من الموقع أو من داخل النظام) — لعميل له حساب فقط
 # =====================================================================
 RENEW_HITS = {}  # محاولات البحث لكل IP — يمنع تجربة أرقام عشوائية لمعرفة المشتركين
@@ -395,6 +639,10 @@ def create_renewal(acc: dict, plan: dict, method: str, notes: str, source: str, 
     if r["status"] == "contacted":
         r["status"] = "new"
     r["history"].append({"time": now_iso(), "by": "العميل", "action": f"{action} — {plan['name']} ({method or 'بدون طريقة دفع'})"})
+    lic = acc.get("license") or {}
+    notify("renewal", acc.get("name", ""), [("الباقة المطلوبة", f"{plan['name']} — {fmt_money(plan['price'])} {r['currency']}"), ("طريقة الدفع", method),
+                                            ("الجوال", acc["phone"]), ("الاشتراك الحالي", lic.get("label")), ("ينتهي في", (lic.get("end") or "دائم")[:10]),
+                                            ("المصدر", "الموقع" if source == "website" else "من داخل النظام")], notes, route="طلبات الاشتراك والتجديد", throttle_key=r["id"])
     return r
 
 
@@ -461,6 +709,7 @@ def video_engage(b: dict, viewer: str, ip: str, source: str) -> dict:
                                     "created": now_iso(), "status": "pending", "reply": None})
         del DB["videoComments"][:-5000]
         save()
+        notify("comment", v["title"], [("الاسم", name), ("المصدر", "النظام" if source == "system" else "الموقع")], text, route="تعليقات الشروحات", throttle_key="vc:" + viewer)
         return {"ok": True, "pending": True, **video_counts(vid)}
     elif act != "comments":
         return {"ok": False, "error": "طلب غير صالح"}
@@ -1047,6 +1296,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                        "customer": cu, "deviceId": sdev["deviceId"] if sdev else None, "serial": sdev["serial"] if sdev else serial, "ip": ip, "notes": "", "history": [{"time": now_iso(), "by": "العميل", "action": "إرسال الطلب من الموقع"}]}
                 DB["requests"].append(req)
                 save()
+                notify("signup", cu.get("company") or cu.get("ownerName"), [("الباقة", f"{plan['name']} — {fmt_money(final)} {req['currency']}"), ("الجوال", cu.get("mobile")),
+                                                                            ("البريد", cu.get("email")), ("الرقم التسلسلي", req.get("serial")), ("المصدر", "الموقع")], route="طلبات الاشتراك", throttle_key=req["id"])
                 return self.public_json(200, {"ok": True, "requestId": req["id"]})
             if path == "/api/public/video":
                 return self.public_json(200, video_engage(b, clean(b.get("viewer"), 80), ip, "website"))
@@ -1079,6 +1330,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                      "messages": [{"id": uid("m"), "from": "client", "name": name, "text": msg, "images": [], "time": now_iso()}]}
                 DB["tickets"].append(t)
                 save()
+                notify("contact", t["subject"], [("الاسم", name), ("الجوال", phone), ("البريد", t["email"]), ("النوع", t["category"]), ("المنشأة", t["company"])], msg, route="الدعم الفني", throttle_key=t["id"])
                 return self.public_json(200, {"ok": True})
         return self.public_json(404, {"ok": False})
 
@@ -1175,6 +1427,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                        "customer": cu, "deviceId": did, "serial": dev.get("serial"), "ip": self.ip(), "notes": "", "history": [{"time": now_iso(), "by": "العميل", "action": "إرسال الطلب"}]}
                 DB["requests"].append(req)
                 save()
+                notify("signup", cu.get("company") or cu.get("ownerName"), [("الباقة", f"{plan['name']} — {fmt_money(final)} {req['currency']}"), ("الجوال", cu.get("mobile")),
+                                                                            ("البريد", cu.get("email")), ("الرقم التسلسلي", req.get("serial")), ("المصدر", "من داخل النظام")], route="طلبات الاشتراك", throttle_key=req["id"])
                 return self.send_json(200, {"ok": True, "requestId": req["id"]})
             if path == "/api/client/videos":
                 # الشروحات والإعلانات نفسها التي تظهر في الموقع — لتبويب «الشروحات» في خدمة العملاء داخل النظام
@@ -1300,6 +1554,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if t["category"] == "تفعيل الفوترة الإلكترونية":
                     dev["zatcaRequest"] = {"time": now_iso(), "ticketId": t["id"]}
                 save()
+                notify("ticket", t["subject"], [("المنشأة", t["company"]), ("الاسم", t["userName"]), ("الجوال", t["phone"]), ("النوع", t["category"]),
+                                                ("الرقم التسلسلي", t["serial"]), ("مرفقات", f"{len(imgs)} صورة" if imgs else "")], t["messages"][0]["text"], route="الدعم الفني", throttle_key=t["id"])
                 return self.send_json(200, {"ok": True, "ticketId": t["id"]})
             if path == "/api/client/ticket-reply":
                 t = next((x for x in DB["tickets"] if x["id"] == b.get("ticketId") and x["deviceId"] == did), None)
@@ -1310,6 +1566,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 t["status"], t["updated"], t["unread"] = "open", now_iso(), True
                 TYPING.pop((t["id"], "client"), None)
                 save()
+                notify("reply", t["subject"], [("المنشأة", t.get("company")), ("الاسم", clean(b.get("userName"), 120))], clean(b.get("message"), 2000), route="الدعم الفني", throttle_key="reply:" + t["id"])
                 return self.send_json(200, {"ok": True})
             if path == "/api/client/error":
                 DB["errors"].append({"id": uid("err"), "deviceId": did, "serial": dev.get("serial"), "company": clean((dev.get("company") or {}).get("name"), 200),
@@ -1318,6 +1575,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                      "appVersion": dev.get("appVersion"), "time": clean(b.get("time"), 40) or now_iso(), "received": now_iso(), "resolved": False})
                 if len(DB["errors"]) > 5000:
                     del DB["errors"][:-5000]
+                save()
+                if sum(1 for e in DB["errors"][-200:] if e["deviceId"] == did and (_ago_days(e["received"]) or 9) < 1 / 24) >= 3:
+                    notify("error", (dev.get("company") or {}).get("name") or dev.get("serial", ""), [("الرقم التسلسلي", dev.get("serial")), ("النسخة", dev.get("appVersion"))],
+                           clean(b.get("message"), 500), route="الأعطال والفحص الشامل", throttle_key="err:" + did, gap=6 * 3600)
+                return self.send_json(200, {"ok": True})
+            if path == "/api/client/health-report":
+                # نتيجة «فحص سلامة البيانات» عن بُعد من نظام العميل
+                items = [{"sev": clean(x.get("sev"), 10), "t": clean(x.get("t"), 400)} for x in (b.get("items") or [])[:300]]
+                dev["healthReport"] = {"time": now_iso(), "requested": dev.get("healthRequested"), "errors": sum(1 for x in items if x["sev"] == "error"),
+                                       "warnings": sum(1 for x in items if x["sev"] != "error"), "items": items,
+                                       "stats": {k: v for k, v in (b.get("stats") or {}).items() if isinstance(v, (int, float, str)) and len(str(v)) < 80}}
+                dev.pop("healthRequested", None)
                 save()
                 return self.send_json(200, {"ok": True})
             if path == "/api/client/event":
@@ -1484,6 +1753,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     #   واجهة الإدارة
     # =================================================================
     def admin_api(self, method, path, u):
+        PANEL_BASE["url"] = os.environ.get("RAWAJ_PUBLIC_URL", "").rstrip("/") or f"{self.headers.get('X-Forwarded-Proto', 'http')}://{self.headers.get('Host', '')}"
         def need(p):
             if p in OWNER_ONLY and not u["owner"]:
                 raise PermissionError("هذه الصلاحية للمالك فقط")
@@ -1952,6 +2222,46 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 audit(u, "تعديل إعدادات الموقع", ("صيانة الموقع مفعّلة" if S["maintenance"]["on"] else ""))
                 save()
             return self.send_json(200, {"ok": True})
+        if name == "health":
+            need("errors")
+            return self.send_json(200, {"ok": True, "panel": health_panel(q.get("deep") == "1"), "devices": health_devices(), "time": now_iso(),
+                                        "mongo": {k: MONGO.state.get(k) for k in ("enabled", "connected", "lastError", "dbName")} if MONGO else {}})
+        if name == "health/device":
+            need("errors")
+            with lock:
+                d = DB["devices"].get(clean(b.get("deviceId"), 64))
+                if not d:
+                    return self.send_json(404, {"ok": False, "error": "الجهاز غير موجود"})
+                push(d, {"type": "healthcheck"})
+                d["healthRequested"] = now_iso()
+                audit(u, "طلب فحص عن بُعد", d.get("serial", ""))
+                save()
+            return self.send_json(200, {"ok": True})
+        if name == "health/report":
+            need("errors")
+            d = DB["devices"].get(q.get("device") or "")
+            return self.send_json(200, {"ok": True, "report": (d or {}).get("healthReport"), "pending": bool((d or {}).get("healthRequested"))})
+        if name == "notify/settings":
+            need("settings")
+            with lock:
+                cfg = notify_cfg()
+                if method == "POST":
+                    to = clean(b.get("to"), 300).strip()
+                    if to and not all(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", x) for x in re.split(r"[,;\s]+", to) if x):
+                        raise ValueError("بريد غير صحيح")
+                    cfg["to"] = to or DB["owner"]["email"]
+                    for k in NOTIFY_KEYS:
+                        if k in (b.get("events") or {}):
+                            cfg["events"][k] = bool(b["events"][k])
+                    audit(u, "تعديل إشعارات البريد", cfg["to"])
+                    save()
+            return self.send_json(200, {"ok": True, "to": cfg["to"], "events": cfg["events"], "labels": NOTIFY_KEYS, "provider": mail_provider(), "state": NOTIFY_STATE})
+        if name == "notify/test":
+            need("settings")
+            to = [x for x in re.split(r"[,;\s]+", notify_cfg().get("to") or "") if "@" in x] or [DB["owner"]["email"]]
+            ok, err = send_email(to, "رواج — رسالة تجريبية ✅", mail_html("الإشعارات تعمل بنجاح ✅", [("المزود", mail_provider()), ("إلى", ", ".join(to)), ("بواسطة", u["name"])],
+                                                                         "ستصلك رسائل مثل هذه عند وصول طلب اشتراك أو تجديد أو رسالة دعم.", "الإعدادات"))
+            return self.send_json(200 if ok else 400, {"ok": ok, "error": err})
         if name == "video/comments":
             need("site")
             titles = {v["id"]: v["title"] for v in DB["site"].get("videos", [])}
@@ -2770,6 +3080,7 @@ def main():
         print(f"المنفذ {PORT} مستخدم — لوحة التحكم تعمل بالفعل.")
         sys.exit(0)
     threading.Thread(target=backup_worker, daemon=True).start()
+    threading.Thread(target=mail_keepalive, daemon=True).start()
     threading.Thread(target=flush_worker, daemon=True).start()
     print(f"Rawaj control panel: http://127.0.0.1:{PORT}/")
     httpd.serve_forever()
